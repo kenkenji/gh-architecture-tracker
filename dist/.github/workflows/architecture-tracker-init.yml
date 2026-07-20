@@ -96,25 +96,6 @@ jobs:
 
           echo "✅ Branch protection configured"
 
-      - name: Check if SPA source exists
-        id: check-spa
-        shell: bash
-        run: |
-          if [ -d "spa" ] && [ -f "spa/package.json" ]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "ℹ️ spa/ ディレクトリが存在しないため、SPAビルドをスキップします"
-            echo "   （gh extension が pre-built SPA をデプロイ済み）"
-          fi
-
-      - name: Build and deploy SPA
-        if: steps.check-spa.outputs.exists == 'true'
-        uses: ./.github/actions/deploy-spa
-        with:
-          github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
-          repository-name: ${{ github.event.repository.name }}
-
       - name: Enable GitHub Pages
         shell: bash
         env:
