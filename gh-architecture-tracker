@@ -5,6 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DIST_DIR="${SCRIPT_DIR}/dist"
 VERSION=$(cat "${SCRIPT_DIR}/VERSION" 2>/dev/null || echo "dev")
 VERSION_MARKER=".architecture-tracker-version"
+APP_SLUG="architecture-tracker-cv"
+APP_INSTALL_URL="https://github.com/apps/${APP_SLUG}/installations/new"
 
 # --- Colors ---
 
@@ -38,6 +40,36 @@ require_dist() {
 
 get_repo_root() {
   git rev-parse --show-toplevel
+}
+
+require_app_installed() {
+  local app_id=4328043
+  info "GitHub App のインストール状態を確認しています..."
+
+  local raw_response exit_code=0
+  raw_response=$(gh api user/installations 2>&1) || exit_code=$?
+
+  if [ "$exit_code" -ne 0 ]; then
+    error "GitHub API の呼び出しに失敗しました:"
+    error "$raw_response"
+    error "認証状態を確認してください: gh auth status"
+    exit 1
+  fi
+
+  local installation_id
+  installation_id=$(echo "$raw_response" | jq -r ".installations[] | select(.app_id == ${app_id}) | .id" 2>/dev/null || echo "")
+
+  if [ -z "$installation_id" ]; then
+    echo ""
+    error "GitHub App「Architecture Tracker」がインストールされていません。"
+    echo ""
+    echo "  以下のURLからインストールしてください:"
+    echo "  ${APP_INSTALL_URL}"
+    echo ""
+    exit 1
+  fi
+
+  ok "GitHub App を確認しました (installation: ${installation_id})"
 }
 
 get_repo_name() {
@@ -154,6 +186,7 @@ cmd_init() {
 
   require_git_repo
   require_dist
+  require_app_installed
 
   local root
   root=$(get_repo_root)
@@ -280,11 +313,9 @@ Installed via gh-architecture-tracker CLI extension.
   ok "セットアップ完了！"
   echo ""
   echo "次のステップ:"
-  echo "  1. GitHub App をインストール（まだの場合）:"
-  echo "     https://github.com/apps/architecture-tracker-cv/installations/new"
-  echo "  2. LLM APIキーを設定（オプション）:"
+  echo "  1. LLM APIキーを設定（オプション）:"
   echo "     リポジトリ Settings → Secrets → ANTHROPIC_API_KEY or OPENAI_API_KEY"
-  echo "  3. 初期化ワークフローが完了したら、SPA にアクセス:"
+  echo "  2. 初期化ワークフローが完了したら、SPA にアクセス:"
   local owner
   owner=$(gh api user --jq '.login' 2>/dev/null || echo "{owner}")
   echo "     https://${owner}.github.io/${repo_name}/"
@@ -304,6 +335,7 @@ cmd_update() {
 
   require_git_repo
   require_dist
+  require_app_installed
 
   local root
   root=$(get_repo_root)
