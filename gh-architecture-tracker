@@ -125,7 +125,6 @@ deploy_spa_to_ghpages() {
   for f in "${work_dir}/index.html" "${work_dir}/404.html"; do
     if [ -f "$f" ]; then
       sed_inplace "s|__AT_BASE_PATH__ = '/'|__AT_BASE_PATH__ = '/${repo_name}/'|" "$f"
-      sed_inplace "s|<head>|<head><base href=\"/${repo_name}/\" />|" "$f"
     fi
   done
 

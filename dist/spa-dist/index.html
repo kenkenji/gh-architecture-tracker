@@ -26,5 +26,15 @@
   <body>
     <div id="root"></div>
     <script>window.__AT_BASE_PATH__ = '/';</script>
+    <script>
+      (function() {
+        var r = sessionStorage.getItem('spa_redirect');
+        if (r) {
+          sessionStorage.removeItem('spa_redirect');
+          var data = JSON.parse(r);
+          history.replaceState(null, '', data.pathname + data.search + data.hash);
+        }
+      })();
+    </script>
   </body>
 </html>

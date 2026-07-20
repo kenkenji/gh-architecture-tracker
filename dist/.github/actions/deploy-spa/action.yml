@@ -35,7 +35,6 @@ runs:
         for f in "${dist_dir}/index.html" "${dist_dir}/404.html"; do
           if [ -f "$f" ]; then
             sed -i "s|__AT_BASE_PATH__ = '/'|__AT_BASE_PATH__ = '/${REPO_NAME}/'|" "$f"
-            sed -i "s|<head>|<head><base href=\"/${REPO_NAME}/\" />|" "$f"
           fi
         done
 
