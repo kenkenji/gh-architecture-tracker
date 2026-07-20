@@ -1,0 +1,481 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DIST_DIR="${SCRIPT_DIR}/dist"
+VERSION=$(cat "${SCRIPT_DIR}/VERSION" 2>/dev/null || echo "dev")
+VERSION_MARKER=".architecture-tracker-version"
+
+# --- Colors ---
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+info()  { echo -e "${CYAN}ℹ${NC} $*"; }
+ok()    { echo -e "${GREEN}✅${NC} $*"; }
+warn()  { echo -e "${YELLOW}⚠${NC} $*"; }
+error() { echo -e "${RED}✖${NC} $*" >&2; }
+
+# --- Helpers ---
+
+require_git_repo() {
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    error "Gitリポジトリ内で実行してください。"
+    exit 1
+  fi
+}
+
+require_dist() {
+  if [ ! -d "$DIST_DIR" ]; then
+    error "配布ファイルが見つかりません: ${DIST_DIR}"
+    error "gh extension を再インストールしてください: gh extension install kenkenji/gh-architecture-tracker"
+    exit 1
+  fi
+}
+
+get_repo_root() {
+  git rev-parse --show-toplevel
+}
+
+get_repo_name() {
+  gh repo view --json name --jq '.name' 2>/dev/null || \
+    git remote get-url origin 2>/dev/null | sed 's|.*/||;s|\.git$||' || \
+    basename "$(get_repo_root)"
+}
+
+get_installed_version() {
+  local root
+  root=$(get_repo_root)
+  if [ -f "${root}/${VERSION_MARKER}" ]; then
+    cat "${root}/${VERSION_MARKER}"
+  else
+    echo ""
+  fi
+}
+
+confirm() {
+  local prompt="$1"
+  echo -en "${prompt} [Y/n] "
+  read -r answer
+  case "$answer" in
+    [nN]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+sed_inplace() {
+  if [[ "$(uname)" == "Darwin" ]]; then
+    sed -i '' "$@"
+  else
+    sed -i "$@"
+  fi
+}
+
+deploy_spa_to_ghpages() {
+  local root="$1"
+  local repo_name="$2"
+  local spa_dist="${DIST_DIR}/spa-dist"
+
+  if [ ! -d "$spa_dist" ]; then
+    warn "プリビルド済みSPAが見つかりません。初期化ワークフローでビルドしてください。"
+    return 1
+  fi
+
+  info "SPA を gh-pages ブランチにデプロイしています..."
+
+  local work_dir
+  work_dir=$(mktemp -d)
+  trap 'rm -rf "$work_dir"' RETURN
+
+  local remote_url
+  remote_url=$(git -C "$root" remote get-url origin)
+
+  if git ls-remote --heads "$remote_url" gh-pages 2>/dev/null | grep -q 'refs/heads/gh-pages$'; then
+    git clone --branch gh-pages --single-branch "$remote_url" "$work_dir" || {
+      warn "gh-pagesブランチのcloneに失敗しました。"
+      return 1
+    }
+  else
+    git init "$work_dir" >/dev/null 2>&1
+    git -C "$work_dir" checkout --orphan gh-pages >/dev/null 2>&1
+    git -C "$work_dir" remote add origin "$remote_url" 2>/dev/null
+  fi
+
+  # 既存ファイルを削除してビルド済みSPAをコピー
+  find "$work_dir" -mindepth 1 -maxdepth 1 -not -name '.git' -exec rm -rf {} +
+  cp -r "${spa_dist}/." "$work_dir/"
+
+  # ベースパスを注入
+  for f in "${work_dir}/index.html" "${work_dir}/404.html"; do
+    if [ -f "$f" ]; then
+      sed_inplace "s|__AT_BASE_PATH__ = '/'|__AT_BASE_PATH__ = '/${repo_name}/'|" "$f"
+    fi
+  done
+
+  # .nojekyll を作成
+  touch "${work_dir}/.nojekyll"
+
+  git -C "$work_dir" config user.name "$(git config user.name || echo 'gh-extension')"
+  git -C "$work_dir" config user.email "$(git config user.email || echo 'gh-extension@users.noreply.github.com')"
+  git -C "$work_dir" add -A
+
+  if git -C "$work_dir" diff --cached --quiet 2>/dev/null; then
+    ok "SPA に変更はありません"
+  else
+    git -C "$work_dir" commit -m "Deploy SPA to GitHub Pages (v${VERSION})" >/dev/null
+    if git -C "$work_dir" push origin gh-pages; then
+      ok "SPA を gh-pages にデプロイしました"
+    else
+      warn "gh-pages へのプッシュに失敗しました。"
+      return 1
+    fi
+  fi
+
+  return 0
+}
+
+# --- Commands ---
+
+cmd_init() {
+  local no_push=false
+  local no_workflow=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-push) no_push=true; shift ;;
+      --no-workflow) no_workflow=true; shift ;;
+      --help|-h) usage_init; exit 0 ;;
+      *) error "不明なオプション: $1"; usage_init; exit 1 ;;
+    esac
+  done
+
+  require_git_repo
+  require_dist
+
+  local root
+  root=$(get_repo_root)
+  local repo_name
+  repo_name=$(get_repo_name)
+
+  info "Architecture Tracker をセットアップします (v${VERSION})"
+  echo ""
+
+  # 競合チェック
+  local conflicts=()
+  if [ -f "${root}/.github/workflows/architecture-tracker.yml" ]; then
+    conflicts+=(".github/workflows/architecture-tracker.yml")
+  fi
+  if [ -f "${root}/.github/workflows/architecture-tracker-init.yml" ]; then
+    conflicts+=(".github/workflows/architecture-tracker-init.yml")
+  fi
+
+  if [ ${#conflicts[@]} -gt 0 ]; then
+    warn "以下のファイルが既に存在します:"
+    for f in "${conflicts[@]}"; do
+      echo "  - ${f}"
+    done
+    if ! confirm "上書きしますか？"; then
+      info "中止しました。'gh architecture-tracker update' で更新できます。"
+      exit 0
+    fi
+  fi
+
+  # ファイルコピー
+  info "ファイルをコピーしています..."
+
+  # .github/workflows/
+  mkdir -p "${root}/.github/workflows"
+  cp "${DIST_DIR}/.github/workflows/architecture-tracker.yml" "${root}/.github/workflows/"
+  cp "${DIST_DIR}/.github/workflows/architecture-tracker-init.yml" "${root}/.github/workflows/"
+  ok ".github/workflows/ (2ファイル)"
+
+  # .github/actions/
+  local actions=("track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa")
+  local action_count=0
+  for action in "${actions[@]}"; do
+    if [ -d "${DIST_DIR}/.github/actions/${action}" ]; then
+      mkdir -p "${root}/.github/actions/${action}"
+      cp -r "${DIST_DIR}/.github/actions/${action}/." "${root}/.github/actions/${action}/"
+      action_count=$((action_count + 1))
+    fi
+  done
+  ok ".github/actions/ (${action_count}ディレクトリ)"
+
+  # バージョンマーカー
+  echo "$VERSION" > "${root}/${VERSION_MARKER}"
+
+  echo ""
+  ok "ファイルの配置が完了しました"
+
+  # Git操作
+  if [ "$no_push" = true ]; then
+    info "--no-push が指定されたため、コミット・プッシュはスキップします。"
+    info "手動でコミット・プッシュしてください。"
+  else
+    echo ""
+    info "変更をコミット・プッシュします..."
+
+    cd "$root"
+    local add_targets=(.github/workflows/architecture-tracker.yml
+                       .github/workflows/architecture-tracker-init.yml
+                       "${VERSION_MARKER}")
+    for action in "${actions[@]}"; do
+      if [ -d ".github/actions/${action}" ]; then
+        add_targets+=(".github/actions/${action}")
+      fi
+    done
+    git add "${add_targets[@]}"
+
+    if git diff --cached --quiet; then
+      info "変更はありません（既に最新です）。"
+    else
+      git commit -m "Add Architecture Tracker (v${VERSION})
+
+Installed via gh-architecture-tracker CLI extension.
+- Workflow files for PR tracking and initialization
+- Composite Actions for component extraction and mapping"
+
+      local branch
+      branch=$(git branch --show-current)
+      if git push origin "$branch"; then
+        ok "プッシュ完了 (${branch})"
+      else
+        warn "プッシュに失敗しました。手動で 'git push' してください。"
+      fi
+    fi
+  fi
+
+  # SPA デプロイ & データブランチ作成
+  if [ "$no_push" = false ] && [ "$no_workflow" = false ]; then
+    echo ""
+
+    # プリビルド済みSPAがあれば直接デプロイ
+    if [ -d "${DIST_DIR}/spa-dist" ]; then
+      deploy_spa_to_ghpages "$root" "$repo_name" || true
+    fi
+
+    # 初期化ワークフロー起動（データブランチ作成）
+    if confirm "初期化ワークフローを実行しますか？（データブランチ作成・GitHub Pages有効化）"; then
+      local repo
+      repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
+      if [ -n "$repo" ]; then
+        if gh workflow run architecture-tracker-init.yml --repo "$repo" 2>/dev/null; then
+          ok "初期化ワークフローを起動しました"
+          info "進捗は Actions タブで確認できます:"
+          info "  https://github.com/${repo}/actions/workflows/architecture-tracker-init.yml"
+        else
+          warn "ワークフローの起動に失敗しました。Actions タブから手動で実行してください。"
+        fi
+      else
+        warn "リポジトリ情報を取得できませんでした。Actions タブから手動で実行してください。"
+      fi
+    fi
+  fi
+
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  ok "セットアップ完了！"
+  echo ""
+  echo "次のステップ:"
+  echo "  1. GitHub App をインストール（まだの場合）:"
+  echo "     https://github.com/apps/architecture-tracker-cv/installations/new"
+  echo "  2. LLM APIキーを設定（オプション）:"
+  echo "     リポジトリ Settings → Secrets → ANTHROPIC_API_KEY or OPENAI_API_KEY"
+  echo "  3. 初期化ワークフローが完了したら、SPA にアクセス:"
+  local owner
+  owner=$(gh api user --jq '.login' 2>/dev/null || echo "{owner}")
+  echo "     https://${owner}.github.io/${repo_name}/"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
+cmd_update() {
+  local no_push=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-push) no_push=true; shift ;;
+      --help|-h) usage_update; exit 0 ;;
+      *) error "不明なオプション: $1"; usage_update; exit 1 ;;
+    esac
+  done
+
+  require_git_repo
+  require_dist
+
+  local root
+  root=$(get_repo_root)
+  local repo_name
+  repo_name=$(get_repo_name)
+
+  local installed
+  installed=$(get_installed_version)
+
+  if [ -z "$installed" ]; then
+    warn "Architecture Tracker がまだインストールされていません。"
+    info "'gh architecture-tracker init' を実行してください。"
+    exit 1
+  fi
+
+  info "現在のバージョン: ${installed}"
+  info "最新のバージョン: ${VERSION}"
+
+  if [ "$installed" = "$VERSION" ]; then
+    ok "既に最新バージョンです。"
+    exit 0
+  fi
+
+  if ! confirm "v${installed} → v${VERSION} に更新しますか？"; then
+    info "中止しました。"
+    exit 0
+  fi
+
+  info "ファイルを更新しています..."
+
+  # ワークフロー
+  cp "${DIST_DIR}/.github/workflows/architecture-tracker.yml" "${root}/.github/workflows/"
+  cp "${DIST_DIR}/.github/workflows/architecture-tracker-init.yml" "${root}/.github/workflows/"
+  ok ".github/workflows/"
+
+  # Composite Actions
+  local actions=("track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa")
+  for action in "${actions[@]}"; do
+    if [ -d "${DIST_DIR}/.github/actions/${action}" ]; then
+      mkdir -p "${root}/.github/actions/${action}"
+      cp -r "${DIST_DIR}/.github/actions/${action}/." "${root}/.github/actions/${action}/"
+    fi
+  done
+  ok ".github/actions/"
+
+  # バージョン更新
+  echo "$VERSION" > "${root}/${VERSION_MARKER}"
+
+  if [ "$no_push" = true ]; then
+    info "--no-push が指定されたため、コミット・プッシュはスキップします。"
+  else
+    cd "$root"
+    local add_targets=(.github/workflows/architecture-tracker.yml
+                       .github/workflows/architecture-tracker-init.yml
+                       "${VERSION_MARKER}")
+    for action in "${actions[@]}"; do
+      if [ -d ".github/actions/${action}" ]; then
+        add_targets+=(".github/actions/${action}")
+      fi
+    done
+    git add "${add_targets[@]}"
+
+    if git diff --cached --quiet; then
+      info "変更はありません。"
+    else
+      git commit -m "Update Architecture Tracker to v${VERSION}
+
+Updated via gh-architecture-tracker CLI extension."
+
+      local branch
+      branch=$(git branch --show-current)
+      if git push origin "$branch"; then
+        ok "プッシュ完了 (${branch})"
+      else
+        warn "プッシュに失敗しました。手動で 'git push' してください。"
+      fi
+    fi
+  fi
+
+  echo ""
+  ok "v${VERSION} への更新が完了しました"
+
+  # プリビルド済みSPAがあれば直接デプロイ
+  if [ -d "${DIST_DIR}/spa-dist" ]; then
+    if confirm "SPA を再デプロイしますか？"; then
+      deploy_spa_to_ghpages "$root" "$repo_name" || true
+    fi
+  else
+    if confirm "SPA を再ビルドしますか？（初期化ワークフローを実行）"; then
+      local repo
+      repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
+      if [ -n "$repo" ]; then
+        gh workflow run architecture-tracker-init.yml --repo "$repo" 2>/dev/null && \
+          ok "初期化ワークフローを起動しました" || \
+          warn "ワークフローの起動に失敗しました。Actions タブから手動で実行してください。"
+      fi
+    fi
+  fi
+}
+
+cmd_version() {
+  echo "gh-architecture-tracker v${VERSION}"
+
+  local installed
+  installed=$(get_installed_version 2>/dev/null || echo "")
+  if [ -n "$installed" ]; then
+    echo "インストール済みバージョン: v${installed}"
+    if [ "$installed" != "$VERSION" ]; then
+      warn "更新があります。'gh architecture-tracker update' で更新できます。"
+    fi
+  fi
+}
+
+# --- Usage ---
+
+usage() {
+  cat <<EOF
+gh architecture-tracker — Architecture Tracker セットアップツール
+
+使い方:
+  gh architecture-tracker <command> [options]
+
+コマンド:
+  init      リポジトリに Architecture Tracker をセットアップする
+  update    Architecture Tracker を最新バージョンに更新する
+  version   バージョン情報を表示する
+
+詳細:
+  gh architecture-tracker <command> --help
+EOF
+}
+
+usage_init() {
+  cat <<EOF
+gh architecture-tracker init — リポジトリに Architecture Tracker をセットアップする
+
+使い方:
+  gh architecture-tracker init [options]
+
+オプション:
+  --no-push       ファイル配置のみ行い、コミット・プッシュはしない
+  --no-workflow   初期化ワークフローを自動実行しない
+  -h, --help      このヘルプを表示
+
+処理内容:
+  1. ワークフローファイル・Composite Actionをリポジトリに配置
+  2. 変更をコミット・プッシュ
+  3. プリビルド済みSPAをgh-pagesにデプロイ
+  4. 初期化ワークフローを起動（データブランチ作成・GitHub Pages有効化）
+EOF
+}
+
+usage_update() {
+  cat <<EOF
+gh architecture-tracker update — Architecture Tracker を最新バージョンに更新する
+
+使い方:
+  gh architecture-tracker update [options]
+
+オプション:
+  --no-push    ファイル更新のみ行い、コミット・プッシュはしない
+  -h, --help   このヘルプを表示
+EOF
+}
+
+# --- Main ---
+
+case "${1:-}" in
+  init)    shift; cmd_init "$@" ;;
+  update)  shift; cmd_update "$@" ;;
+  version) cmd_version ;;
+  --help|-h) usage ;;
+  "") usage ;;
+  *) error "不明なコマンド: $1"; usage; exit 1 ;;
+esac

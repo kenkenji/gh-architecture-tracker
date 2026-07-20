@@ -1,0 +1,163 @@
+name: Architecture Tracker Init
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+jobs:
+  initialize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Installation Token
+        id: app-token
+        if: ${{ vars.APP_ID != '' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Create _architecture-tracker branch if not exists
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          DATA_BRANCH="_architecture-tracker"
+          repo_url="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+
+          if git ls-remote --heads "$repo_url" "$DATA_BRANCH" | grep -q "$DATA_BRANCH"; then
+            echo "✅ ${DATA_BRANCH} branch already exists"
+            exit 0
+          fi
+
+          echo "Creating ${DATA_BRANCH} branch..."
+          work_dir=$(mktemp -d)
+          git init "$work_dir"
+          cd "$work_dir"
+          git checkout --orphan "$DATA_BRANCH"
+          git remote add origin "$repo_url"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 初期データファイルを作成
+          cat > components.yaml << 'YAML'
+          # Architecture Tracker — コンポーネント定義
+          # SPA上のエディタで編集できます
+          model: c4
+          systems: []
+          relations: []
+          YAML
+
+          echo '{"mappings":[]}' > mappings.json
+          echo '{"entries":[]}' > timeline.json
+
+          git add -A
+          git commit -m "Initialize architecture tracker data"
+          git push origin "$DATA_BRANCH"
+
+          echo "✅ Created ${DATA_BRANCH} branch with initial data"
+          cd - > /dev/null
+          rm -rf "$work_dir"
+
+      - name: Configure branch protection for _architecture-tracker
+        if: ${{ vars.APP_ID != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          echo "Configuring branch protection for _architecture-tracker..."
+
+          # Branch Protection Ruleを設定
+          # restrictions（push制限）はOrganizationリポジトリでのみ有効
+          # 個人リポジトリではforce push/deleteの禁止のみ適用される
+          gh api "repos/${REPO}/branches/_architecture-tracker/protection" \
+            -X PUT \
+            --input - << 'JSON' || echo "::warning::Branch protection設定に失敗しました（権限不足の可能性があります）"
+          {
+            "required_status_checks": null,
+            "enforce_admins": false,
+            "required_pull_request_reviews": null,
+            "restrictions": null,
+            "allow_force_pushes": false,
+            "allow_deletions": false
+          }
+          JSON
+
+          echo "✅ Branch protection configured"
+
+      - name: Build and deploy SPA
+        uses: ./.github/actions/deploy-spa
+        with:
+          github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          repository-name: ${{ github.event.repository.name }}
+
+      - name: Enable GitHub Pages
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # GitHub Pagesの現在の設定を確認
+          pages_status=$(gh api "repos/${REPO}/pages" --jq '.status' 2>/dev/null || echo "not_found")
+
+          if [ "$pages_status" != "not_found" ]; then
+            echo "✅ GitHub Pages is already configured (status: ${pages_status})"
+            # ソースブランチがgh-pagesでない場合は更新
+            current_branch=$(gh api "repos/${REPO}/pages" --jq '.source.branch' 2>/dev/null || echo "")
+            if [ "$current_branch" != "gh-pages" ]; then
+              echo "Updating Pages source to gh-pages branch..."
+              gh api "repos/${REPO}/pages" \
+                -X PUT \
+                -f "source[branch]=gh-pages" \
+                -f "source[path]=/" \
+                --silent 2>/dev/null || true
+            fi
+            exit 0
+          fi
+
+          # GitHub Pagesを有効化
+          echo "Enabling GitHub Pages..."
+          if gh api "repos/${REPO}/pages" \
+            -X POST \
+            -f "source[branch]=gh-pages" \
+            -f "source[path]=/" \
+            --silent 2>/dev/null; then
+            echo "✅ GitHub Pages enabled successfully"
+          else
+            echo "::warning::GitHub Pagesの自動有効化に失敗しました"
+            echo ""
+            echo "以下の手順で手動設定してください："
+            echo "1. リポジトリのSettings → Pagesを開く"
+            echo "2. Source を 'Deploy from a branch' に設定"
+            echo "3. Branch を 'gh-pages' / '/ (root)' に設定"
+            echo "4. Save をクリック"
+          fi
+
+      - name: Show deployment URL
+        shell: bash
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          owner="${REPO%%/*}"
+          repo="${REPO##*/}"
+          echo ""
+          echo "=========================================="
+          echo "  Architecture Tracker の初期化が完了しました"
+          echo "=========================================="
+          echo ""
+          echo "SPA URL: https://${owner}.github.io/${repo}/"
+          echo ""
+          echo "※ GitHub Pagesの初回デプロイには数分かかる場合があります"

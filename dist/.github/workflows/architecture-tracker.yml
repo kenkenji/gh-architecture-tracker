@@ -1,0 +1,138 @@
+name: Architecture Tracker
+
+on:
+  pull_request_review:
+    types: [submitted]
+  pull_request:
+    types: [closed]
+  issue_comment:
+    types: [edited]
+
+concurrency:
+  group: architecture-tracker-data
+  cancel-in-progress: false
+
+jobs:
+  post-comment:
+    if: >-
+      (github.event_name == 'pull_request_review'
+       && github.event.review.state == 'approved')
+      || (github.event_name == 'pull_request'
+       && github.event.pull_request.merged == true)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Installation Token
+        id: app-token
+        if: ${{ vars.APP_ID != '' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Fetch config from data branch
+        id: config
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          config_yaml=$(gh api "repos/${REPO}/contents/config.yaml?ref=_architecture-tracker" \
+            --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+          if [ -n "$config_yaml" ]; then
+            model=$(echo "$config_yaml" | grep -A1 '^llm:' | grep 'model:' | sed 's/.*model:[[:space:]]*//' | sed 's/[[:space:]]*#.*//' | tr -d '[:space:]')
+            echo "model=${model}" >> "$GITHUB_OUTPUT"
+          else
+            echo "model=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Track architecture
+        uses: ./.github/actions/track-architecture
+        with:
+          github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          data-branch: _architecture-tracker
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          model: ${{ steps.config.outputs.model }}
+
+  merge-catchup:
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.merged == true
+    needs: post-comment
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Installation Token
+        id: app-token
+        if: ${{ vars.APP_ID != '' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Catch up pre-merge selections
+        id: catchup
+        uses: ./.github/actions/catch-up-mapping
+        with:
+          github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          data-branch: _architecture-tracker
+
+      - name: Generate Mermaid diagrams
+        if: steps.catchup.outputs.recorded == 'true'
+        uses: ./.github/actions/generate-mermaid
+        with:
+          github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          data-branch: _architecture-tracker
+          pr-number: ${{ github.event.pull_request.number }}
+
+  record-mapping:
+    if: >-
+      github.event_name == 'issue_comment'
+      && github.event.action == 'edited'
+      && github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Installation Token
+        id: app-token
+        if: ${{ vars.APP_ID != '' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Record mapping
+        id: record
+        uses: ./.github/actions/record-mapping
+        with:
+          github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          data-branch: _architecture-tracker
+
+      - name: Generate Mermaid diagrams
+        if: steps.record.outputs.skipped != 'true'
+        uses: ./.github/actions/generate-mermaid
+        with:
+          github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          data-branch: _architecture-tracker
+          pr-number: ${{ github.event.issue.number }}

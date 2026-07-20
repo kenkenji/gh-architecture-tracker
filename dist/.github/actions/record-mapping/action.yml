@@ -1,0 +1,203 @@
+name: "Record Mapping"
+description: "コメントのチェックボックス変更を検知し、マッピングデータを_architecture-trackerブランチに記録する"
+
+inputs:
+  github-token:
+    description: "GitHub token for API access"
+    required: true
+  data-branch:
+    description: "Branch name where architecture data is stored"
+    required: true
+    default: "_architecture-tracker"
+
+outputs:
+  skipped:
+    description: "Whether the mapping was skipped (not a tracker comment or PR not merged)"
+    value: ${{ steps.result.outputs.skipped }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Parse checked components
+      id: parse
+      shell: bash
+      env:
+        COMMENT_BODY: ${{ github.event.comment.body }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+
+        result=$(python3 "${ACTION_PATH}/parse_checkboxes.py")
+
+        if [ "$result" = "not-tracker-comment" ]; then
+          echo "Not an Architecture Tracker comment, skipping."
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        components=$(echo "$result" | jq -c '.components')
+        source=$(echo "$result" | jq -r '.source')
+        ai_components=$(echo "$result" | jq -c '.ai_components')
+        no_impact=$(echo "$result" | jq -r '.no_impact')
+
+        # コンポーネント選択がある場合は no_impact を無視（コンポーネント選択を優先）
+        if [ "$components" != "[]" ]; then
+          no_impact="false"
+        fi
+
+        if [ "$components" = "[]" ] && [ "$no_impact" != "true" ]; then
+          echo "No components selected and no_impact not checked, skipping."
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "skip=false" >> "$GITHUB_OUTPUT"
+        echo "components=${components}" >> "$GITHUB_OUTPUT"
+        echo "source=${source}" >> "$GITHUB_OUTPUT"
+        echo "ai_components=${ai_components}" >> "$GITHUB_OUTPUT"
+        echo "no_impact=${no_impact}" >> "$GITHUB_OUTPUT"
+        echo "Checked components: ${components} (source: ${source}, no_impact: ${no_impact})"
+
+    - name: Fetch PR info
+      id: pr-info
+      if: steps.parse.outputs.skip != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        ISSUE_NUMBER: ${{ github.event.issue.number }}
+      run: |
+        set -euo pipefail
+
+        merged=$(gh api "repos/${REPO}/pulls/${ISSUE_NUMBER}" --jq '.merged')
+        if [ "$merged" != "true" ]; then
+          echo "PR is not merged, skipping."
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "skip=false" >> "$GITHUB_OUTPUT"
+        gh api "repos/${REPO}/pulls/${ISSUE_NUMBER}" \
+          --jq '"pr_title=\(.title)\npr_url=\(.html_url)\nmerged_at=\(.merged_at)"' \
+          >> "$GITHUB_OUTPUT"
+
+    - name: Set result
+      id: result
+      if: steps.parse.outputs.skip == 'true' || steps.pr-info.outputs.skip == 'true'
+      shell: bash
+      run: echo "skipped=true" >> "$GITHUB_OUTPUT"
+
+    - name: Update data branch
+      if: steps.parse.outputs.skip != 'true' && steps.pr-info.outputs.skip != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        DATA_BRANCH: ${{ inputs.data-branch }}
+        PR_NUMBER: ${{ github.event.issue.number }}
+        PR_TITLE: ${{ steps.pr-info.outputs.pr_title }}
+        PR_URL: ${{ steps.pr-info.outputs.pr_url }}
+        MERGED_AT: ${{ steps.pr-info.outputs.merged_at }}
+        COMPONENTS: ${{ steps.parse.outputs.components }}
+        SOURCE: ${{ steps.parse.outputs.source }}
+        AI_COMPONENTS: ${{ steps.parse.outputs.ai_components }}
+        NO_IMPACT: ${{ steps.parse.outputs.no_impact }}
+        AUTHOR: ${{ github.event.sender.login }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+
+        max_retries=3
+        retry=0
+
+        ai_args=()
+        if [ "$SOURCE" = "ai" ] && [ "$AI_COMPONENTS" != "[]" ] && [ -n "$AI_COMPONENTS" ]; then
+          ai_args=(--ai-components "$AI_COMPONENTS")
+        fi
+
+        if [ "$NO_IMPACT" = "true" ]; then
+          ai_args+=(--no-impact)
+        fi
+
+        while [ $retry -lt $max_retries ]; do
+          # データブランチをクローン
+          work_dir=$(mktemp -d)
+          git clone --branch "${DATA_BRANCH}" --single-branch \
+            "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$work_dir"
+
+          # データ更新
+          python3 "${ACTION_PATH}/update_data.py" \
+            --mappings-file "${work_dir}/mappings.json" \
+            --timeline-file "${work_dir}/timeline.json" \
+            --pr-number "$PR_NUMBER" \
+            --pr-title "$PR_TITLE" \
+            --pr-url "$PR_URL" \
+            --merged-at "$MERGED_AT" \
+            --components "$COMPONENTS" \
+            --author "$AUTHOR" \
+            --source "$SOURCE" \
+            "${ai_args[@]}"
+
+          # コミット & プッシュ
+          cd "$work_dir"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mappings.json timeline.json
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            rm -rf "$work_dir"
+            exit 0
+          fi
+
+          git commit -m "Update mapping for PR #${PR_NUMBER}"
+
+          if git push origin "${DATA_BRANCH}"; then
+            echo "✅ Successfully updated data branch."
+            rm -rf "$work_dir"
+            exit 0
+          fi
+
+          echo "⚠️ Push failed (attempt $((retry + 1))/${max_retries}), retrying..."
+          retry=$((retry + 1))
+          cd /tmp
+          rm -rf "$work_dir"
+          sleep $((retry * 2))
+        done
+
+        echo "::error::Failed to push after ${max_retries} retries"
+        exit 1
+
+    - name: Close tracking issue
+      if: steps.parse.outputs.skip != 'true' && steps.pr-info.outputs.skip != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.issue.number }}
+        NO_IMPACT: ${{ steps.parse.outputs.no_impact }}
+      run: |
+        set -euo pipefail
+
+        # PR番号に対応するトラッキングIssueを検索
+        issue_number=$(gh issue list \
+          --label "architecture-tracking" \
+          --state open \
+          --limit 1000 \
+          --json number,title \
+          --jq "[.[] | select(.title | test(\"PR #$PR_NUMBER —\"))] | .[0].number" \
+          --repo "$REPO")
+
+        if [ -n "$issue_number" ] && [ "$issue_number" != "null" ]; then
+          if [ "$NO_IMPACT" = "true" ]; then
+            close_comment="✅ PR #${PR_NUMBER} はアーキテクチャへの影響なしと記録されました。"
+          else
+            close_comment="✅ PR #${PR_NUMBER} のコンポーネント紐付けが完了しました。"
+          fi
+          gh issue close "$issue_number" \
+            --comment "$close_comment" \
+            --repo "$REPO"
+          echo "✅ Closed tracking issue #${issue_number}"
+        else
+          echo "ℹ️ No open tracking issue found for PR #${PR_NUMBER}"
+        fi

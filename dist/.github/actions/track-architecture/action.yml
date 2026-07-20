@@ -1,0 +1,179 @@
+name: "Track Architecture"
+description: "PRのApprove時またはマージ時にコンポーネント一覧のチェックボックス付きコメントを投稿し、トラッキングIssueを作成する。LLM APIキーが設定されている場合はAI提案コメントを投稿する。"
+
+inputs:
+  github-token:
+    description: "GitHub token for API access"
+    required: true
+  data-branch:
+    description: "Branch name where architecture data is stored"
+    required: true
+    default: "_architecture-tracker"
+  anthropic-api-key:
+    description: "Anthropic API key for Claude (optional)"
+    required: false
+    default: ""
+  openai-api-key:
+    description: "OpenAI API key for GPT (optional)"
+    required: false
+    default: ""
+  claude-code-oauth-token:
+    description: "Claude Code OAuth token for CLI-based extraction"
+    required: false
+    default: ""
+  model:
+    description: "LLM model name (default: provider's standard model)"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Python dependencies
+      shell: bash
+      run: pip install pyyaml
+
+    - name: Check for existing comment
+      id: check
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+
+        MARKER="## 🏗 Architecture Tracker"
+        existing=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+          --paginate \
+          --jq ".[] | select(.body | startswith(\"${MARKER}\")) | .id" \
+          | head -1)
+
+        if [ -n "$existing" ]; then
+          echo "✅ Architecture Tracker comment already exists on PR #${PR_NUMBER}, skipping."
+          echo "already_posted=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "already_posted=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Extract components via LLM
+      id: extract
+      if: steps.check.outputs.already_posted != 'true'
+      continue-on-error: true
+      uses: ./.github/actions/extract-components
+      with:
+        github-token: ${{ inputs.github-token }}
+        data-branch: ${{ inputs.data-branch }}
+        anthropic-api-key: ${{ inputs.anthropic-api-key }}
+        openai-api-key: ${{ inputs.openai-api-key }}
+        claude-code-oauth-token: ${{ inputs.claude-code-oauth-token }}
+        model: ${{ inputs.model }}
+
+    - name: Fetch components and post comment
+      if: steps.check.outputs.already_posted != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        DATA_BRANCH: ${{ inputs.data-branch }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        REPO: ${{ github.repository }}
+        ACTION_PATH: ${{ github.action_path }}
+        AI_COMPONENTS: ${{ steps.extract.outputs.components }}
+        AI_SKIPPED: ${{ steps.extract.outputs.skipped }}
+        AI_PROVIDER: ${{ steps.extract.outputs.provider }}
+        AI_OUTCOME: ${{ steps.extract.outcome }}
+      run: |
+        set -euo pipefail
+
+        echo "Fetching components.yaml from branch: ${DATA_BRANCH}"
+        components_yaml=$(gh api "repos/${REPO}/contents/components.yaml?ref=${DATA_BRANCH}" \
+          --jq '.content' | base64 -d)
+
+        if [ -z "$components_yaml" ]; then
+          echo "::error::components.yaml not found on branch ${DATA_BRANCH}"
+          exit 1
+        fi
+
+        components_file=$(mktemp --suffix=.yaml)
+        echo "$components_yaml" > "$components_file"
+
+        extra_args=()
+        ai_notice=""
+        if [ "$AI_OUTCOME" = "success" ] && [ "$AI_SKIPPED" != "true" ] && [ -n "$AI_COMPONENTS" ] && [ "$AI_COMPONENTS" != "[]" ]; then
+          extra_args=(--ai-components "$AI_COMPONENTS")
+          echo "🤖 AI extraction succeeded (provider: ${AI_PROVIDER}), posting AI proposal comment"
+        else
+          if [ "$AI_OUTCOME" != "success" ]; then
+            echo "⚠️ AI extraction failed, falling back to manual mapping comment"
+            echo "::warning::AI抽出に失敗しました。手動モードでコメントを投稿します。モデルIDの廃止やAPIキー設定を確認してください。"
+            ai_notice=$'\n\n> ⚠️ AI抽出に失敗しました（手動モードで投稿）。モデルIDの廃止やAPIキー設定を確認してください。'
+          elif [ "$AI_SKIPPED" != "true" ]; then
+            echo "🤖 AI extraction succeeded but found no matching components (provider: ${AI_PROVIDER})"
+            extra_args=(--no-impact-default)
+            ai_notice=$'\n\n> ℹ️ AI抽出の結果、影響コンポーネントは検出されませんでした。該当がある場合は手動で選択してください。'
+          else
+            echo "📝 No AI extraction available, posting manual mapping comment"
+          fi
+        fi
+
+        comment_file=$(mktemp --suffix=.md)
+        python3 "${ACTION_PATH}/build_comment.py" \
+          --pr-number "$PR_NUMBER" \
+          --pr-title "$PR_TITLE" \
+          --components-file "$components_file" \
+          "${extra_args[@]}" \
+          > "$comment_file"
+
+        if [ -n "$ai_notice" ]; then
+          echo "$ai_notice" >> "$comment_file"
+        fi
+
+        rm -f "$components_file"
+
+        echo "Posting comment to PR #${PR_NUMBER}"
+        gh pr comment "$PR_NUMBER" --body-file "$comment_file" --repo "$REPO"
+
+        rm -f "$comment_file"
+        echo "✅ Architecture tracking comment posted successfully"
+
+    - name: Create tracking issue
+      if: steps.check.outputs.already_posted != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+
+        # ラベルがなければ作成（既に存在すればスキップ）
+        gh label create "architecture-tracking" \
+          --description "Architecture Tracker自動作成のトラッキングIssue" \
+          --color "1d76db" \
+          --repo "$REPO" 2>/dev/null || true
+
+        issue_body_file=$(mktemp --suffix=.md)
+        {
+          echo "PRのアーキテクチャコンポーネント紐付けが未完了です。"
+          echo ""
+          printf "**対象PR**: #%s — %s\n" "$PR_NUMBER" "$PR_TITLE"
+          echo ""
+          printf "PR上の [Architecture Trackerコメント](https://github.com/%s/pull/%s) でコンポーネントを選択してください。\n" "$REPO" "$PR_NUMBER"
+          echo "選択が完了すると、このIssueは自動的にクローズされます。"
+          echo ""
+          echo "---"
+          echo '<sub>🤖 このIssueは <a href="https://github.com/kenkenji/architecture-tracker">Architecture Tracker</a> が自動作成しました</sub>'
+        } > "$issue_body_file"
+
+        printf -v issue_title "🏗 Architecture Tracking: PR #%s — %s" "$PR_NUMBER" "$PR_TITLE"
+
+        gh issue create \
+          --title "$issue_title" \
+          --body-file "$issue_body_file" \
+          --label "architecture-tracking" \
+          --repo "$REPO"
+
+        rm -f "$issue_body_file"
+        echo "✅ Tracking issue created for PR #${PR_NUMBER}"
