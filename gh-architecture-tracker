@@ -101,7 +101,6 @@ deploy_spa_to_ghpages() {
 
   local work_dir
   work_dir=$(mktemp -d)
-  trap 'rm -rf "$work_dir"' RETURN
 
   local remote_url
   remote_url=$(git -C "$root" remote get-url origin)
@@ -109,6 +108,7 @@ deploy_spa_to_ghpages() {
   if git ls-remote --heads "$remote_url" gh-pages 2>/dev/null | grep -q 'refs/heads/gh-pages$'; then
     git clone --branch gh-pages --single-branch "$remote_url" "$work_dir" || {
       warn "gh-pagesブランチのcloneに失敗しました。"
+      rm -rf "$work_dir"
       return 1
     }
   else
@@ -143,10 +143,12 @@ deploy_spa_to_ghpages() {
       ok "SPA を gh-pages にデプロイしました"
     else
       warn "gh-pages へのプッシュに失敗しました。"
+      rm -rf "$work_dir"
       return 1
     fi
   fi
 
+  rm -rf "$work_dir"
   return 0
 }
 
