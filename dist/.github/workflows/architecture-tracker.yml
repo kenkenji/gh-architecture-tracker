@@ -7,6 +7,11 @@ on:
     types: [closed]
   issue_comment:
     types: [edited]
+  workflow_dispatch:
+    inputs:
+      pr-number:
+        description: "検出対象のPR番号（手動実行時）"
+        required: true
 
 concurrency:
   group: architecture-tracker-data
@@ -111,11 +116,64 @@ jobs:
           trigger-pr-url: ${{ github.event.pull_request.html_url }}
           author: ${{ github.event.pull_request.user.login }}
 
+  detect-changes:
+    if: >-
+      !failure() && !cancelled()
+      && ((github.event_name == 'pull_request'
+       && github.event.pull_request.merged == true)
+      || github.event_name == 'workflow_dispatch')
+    needs: merge-catchup
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Installation Token
+        id: app-token
+        if: ${{ vars.APP_ID != '' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Fetch config from data branch
+        id: config
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          config_yaml=$(gh api "repos/${REPO}/contents/config.yaml?ref=_architecture-tracker" \
+            --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+          if [ -n "$config_yaml" ]; then
+            model=$(echo "$config_yaml" | grep -A1 '^llm:' | grep 'model:' | sed 's/.*model:[[:space:]]*//' | sed 's/[[:space:]]*#.*//' | tr -d '[:space:]')
+            echo "model=${model}" >> "$GITHUB_OUTPUT"
+          else
+            echo "model=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Detect model changes
+        uses: ./.github/actions/detect-model-changes
+        with:
+          github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          data-branch: _architecture-tracker
+          pr-number: ${{ github.event.pull_request.number || github.event.inputs.pr-number }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          model: ${{ steps.config.outputs.model }}
+
   record-mapping:
     if: >-
       github.event_name == 'issue_comment'
       && github.event.action == 'edited'
       && github.event.issue.pull_request
+      && contains(github.event.comment.body, '🏗 Architecture Tracker')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -158,3 +216,200 @@ jobs:
           trigger-pr-number: ${{ github.event.issue.number }}
           trigger-pr-url: ${{ github.event.issue.html_url }}
           author: ${{ github.event.sender.login }}
+
+  apply-model-changes:
+    if: >-
+      github.event_name == 'issue_comment'
+      && github.event.action == 'edited'
+      && github.event.issue.pull_request
+      && contains(github.event.comment.body, '🔄 Model Change Proposals')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Installation Token
+        id: app-token
+        if: ${{ vars.APP_ID != '' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Setup Python dependencies
+        shell: bash
+        run: pip install "pyyaml>=6,<7"
+
+      - name: Parse proposal checkboxes
+        id: parse
+        shell: bash
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          APP_SLUG: ${{ vars.APP_SLUG }}
+          ACTION_PATH: ${{ github.workspace }}/.github/actions/detect-model-changes
+        run: |
+          set -euo pipefail
+
+          result=$(python3 "${ACTION_PATH}/parse_proposals.py")
+
+          if [ "$result" = "not-proposal-comment" ]; then
+            echo "Not a Model Change Proposals comment, skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          error=$(echo "$result" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('error', ''))" 2>/dev/null || echo "")
+          if [ "$error" = "unauthorized_author" ]; then
+            author=$(echo "$result" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('author', ''))")
+            echo "⚠️ Unauthorized comment author: ${author}, skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          count=$(echo "$result" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('count', 0))")
+          if [ "$count" = "0" ]; then
+            echo "No approved proposals found, skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          approved=$(echo "$result" | python3 -c "import sys, json; d=json.load(sys.stdin); print(json.dumps(d.get('approved_proposals', [])))")
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "approved<<GHEOF_PROPOSALS_END"
+            echo "${approved}"
+            echo "GHEOF_PROPOSALS_END"
+          } >> "$GITHUB_OUTPUT"
+          echo "✅ Found ${count} approved proposal(s)"
+
+      - name: Check PR merged status
+        id: pr-check
+        if: steps.parse.outputs.skip != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          merged=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged')
+          if [ "$merged" != "true" ]; then
+            echo "PR is not merged, skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Apply approved changes
+        id: apply
+        if: steps.parse.outputs.skip != 'true' && steps.pr-check.outputs.skip != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          DATA_BRANCH: _architecture-tracker
+          APPROVED: ${{ steps.parse.outputs.approved }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          PR_URL: ${{ github.event.issue.html_url }}
+          AUTHOR: ${{ github.event.sender.login }}
+          ACTION_PATH: ${{ github.workspace }}/.github/actions/detect-model-changes
+          BUMP_ACTION_PATH: ${{ github.workspace }}/.github/actions/bump-model-version
+        run: |
+          set -euo pipefail
+
+          max_retries=3
+          retry=0
+
+          while [ $retry -lt $max_retries ]; do
+            work_dir=$(mktemp -d)
+            git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+            git clone --branch "${DATA_BRANCH}" --single-branch \
+              "https://github.com/${REPO}.git" "$work_dir"
+
+            # 提案をcomponents.yamlに適用
+            approved_file=$(mktemp --suffix=.json)
+            echo "$APPROVED" > "$approved_file"
+
+            apply_result=$(python3 "${ACTION_PATH}/apply_changes.py" \
+              --proposals "$approved_file" \
+              --components-file "${work_dir}/components.yaml")
+
+            rm -f "$approved_file"
+
+            applied_count=$(echo "$apply_result" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('applied_count', 0))")
+
+            if [ "$applied_count" = "0" ]; then
+              echo "No changes were applied (all proposals were skipped)."
+              rm -rf "$work_dir"
+              exit 0
+            fi
+
+            # 変更内容からchangelog用のchangesを構築
+            changes=$(echo "$apply_result" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          changes = []
+          for r in d.get('results', []):
+              if r.get('status') == 'applied':
+                  changes.append({
+                      'type': r.get('action', 'unknown'),
+                      'target': r.get('id', r.get('relation', '')),
+                  })
+          print(json.dumps(changes))
+          ")
+
+            # バージョンバンプ
+            bump_output=$(python3 "${BUMP_ACTION_PATH}/bump_version.py" \
+              --components-file "${work_dir}/components.yaml" \
+              --changelog-file "${work_dir}/model-changelog.json" \
+              --changes "$changes" \
+              --trigger-type auto \
+              --trigger-pr-number "$PR_NUMBER" \
+              --trigger-pr-url "$PR_URL" \
+              --author "$AUTHOR")
+
+            new_version=$(echo "$bump_output" | grep "^new_version=" | cut -d= -f2)
+
+            cd "$work_dir"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add components.yaml model-changelog.json
+
+            if git diff --cached --quiet; then
+              echo "No changes to commit."
+              rm -rf "$work_dir"
+              exit 0
+            fi
+
+            git commit -m "Apply model changes from PR #${PR_NUMBER} (model-v${new_version})"
+            git tag "model-v${new_version}"
+
+            if git push --tags origin "${DATA_BRANCH}"; then
+              echo "✅ Applied ${applied_count} change(s), bumped to model-v${new_version}"
+              echo "new_version=${new_version}" >> "$GITHUB_OUTPUT"
+              echo "applied_count=${applied_count}" >> "$GITHUB_OUTPUT"
+              rm -rf "$work_dir"
+              exit 0
+            fi
+
+            echo "⚠️ Push failed (attempt $((retry + 1))/${max_retries}), retrying..."
+            retry=$((retry + 1))
+            cd /tmp
+            rm -rf "$work_dir"
+            sleep $((retry * 2))
+          done
+
+          echo "::error::Failed to push after ${max_retries} retries"
+          exit 1
+
+      - name: Generate Mermaid diagrams
+        if: steps.apply.outputs.applied_count != '' && steps.apply.outputs.applied_count != '0'
+        uses: ./.github/actions/generate-mermaid
+        with:
+          github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          data-branch: _architecture-tracker
+          pr-number: ${{ github.event.issue.number }}
