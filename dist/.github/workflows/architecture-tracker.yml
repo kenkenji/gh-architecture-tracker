@@ -100,6 +100,17 @@ jobs:
           data-branch: _architecture-tracker
           pr-number: ${{ github.event.pull_request.number }}
 
+      - name: Bump model version after mapping recorded
+        if: steps.catchup.outputs.recorded == 'true'
+        uses: ./.github/actions/bump-model-version
+        with:
+          github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          data-branch: _architecture-tracker
+          trigger-type: pr
+          trigger-pr-number: ${{ github.event.pull_request.number }}
+          trigger-pr-url: ${{ github.event.pull_request.html_url }}
+          author: ${{ github.event.pull_request.user.login }}
+
   record-mapping:
     if: >-
       github.event_name == 'issue_comment'
@@ -136,3 +147,14 @@ jobs:
           github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
           data-branch: _architecture-tracker
           pr-number: ${{ github.event.issue.number }}
+
+      - name: Bump model version after mapping recorded
+        if: steps.record.outputs.skipped != 'true'
+        uses: ./.github/actions/bump-model-version
+        with:
+          github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          data-branch: _architecture-tracker
+          trigger-type: pr
+          trigger-pr-number: ${{ github.event.issue.number }}
+          trigger-pr-url: ${{ github.event.issue.html_url }}
+          author: ${{ github.event.sender.login }}

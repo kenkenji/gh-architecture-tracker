@@ -111,6 +111,17 @@ runs:
           git clone --branch "${DATA_BRANCH}" --single-branch \
             "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$work_dir"
 
+          # components.yamlから現在のモデルバージョンを取得
+          model_version=$(cd "${RECORD_MAPPING_DIR}" && python3 -c "
+from update_data import read_model_version
+print(read_model_version('${work_dir}/components.yaml'))
+" 2>/dev/null || echo "")
+
+          model_version_args=()
+          if [ -n "$model_version" ]; then
+            model_version_args=(--model-version "$model_version")
+          fi
+
           python3 "${RECORD_MAPPING_DIR}/update_data.py" \
             --mappings-file "${work_dir}/mappings.json" \
             --timeline-file "${work_dir}/timeline.json" \
@@ -121,7 +132,8 @@ runs:
             --components "$COMPONENTS" \
             --author "$AUTHOR" \
             --source "$SOURCE" \
-            "${ai_args[@]}"
+            "${ai_args[@]}" \
+            "${model_version_args[@]}"
 
           cd "$work_dir"
           git config user.name "github-actions[bot]"

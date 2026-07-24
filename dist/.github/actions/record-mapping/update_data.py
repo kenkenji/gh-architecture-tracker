@@ -2,8 +2,21 @@
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
+
+import yaml
+
+
+def read_model_version(components_path: str) -> str:
+    """components.yamlからモデルバージョンを読み取る。"""
+    try:
+        with open(components_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        return str(data.get("version", ""))
+    except (OSError, yaml.YAMLError):
+        return ""
 
 
 def parse_args():
@@ -19,12 +32,13 @@ def parse_args():
     parser.add_argument("--source", default="manual", choices=["manual", "ai"])
     parser.add_argument("--ai-components", default="", help="JSON array of AI-suggested component ids")
     parser.add_argument("--no-impact", action="store_true", help="Mark as intentionally no impact")
+    parser.add_argument("--model-version", default=None, help="Current model version from components.yaml")
     return parser.parse_args()
 
 
 def update_mappings(data, pr_number, pr_title, pr_url, merged_at, components,
                     author, timestamp, source="manual", ai_components=None,
-                    no_impact=False):
+                    no_impact=False, model_version=None):
     if components and no_impact:
         no_impact = False
     entry = {
@@ -41,6 +55,8 @@ def update_mappings(data, pr_number, pr_title, pr_url, merged_at, components,
         entry["ai_components"] = ai_components
     if no_impact:
         entry["no_impact"] = True
+    if model_version is not None:
+        entry["model_version"] = model_version
     data["mappings"][str(pr_number)] = entry
     return data
 
@@ -88,7 +104,7 @@ def main():
         mappings_data, args.pr_number, args.pr_title, args.pr_url,
         args.merged_at, components, args.author, now,
         source=args.source, ai_components=ai_components,
-        no_impact=args.no_impact,
+        no_impact=args.no_impact, model_version=args.model_version,
     )
     timeline_data = update_timeline(
         timeline_data, args.pr_number, args.pr_title, args.pr_url,

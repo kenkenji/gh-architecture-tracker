@@ -56,8 +56,9 @@ jobs:
           relations: []
           YAML
 
-          echo '{"mappings":[]}' > mappings.json
-          echo '{"entries":[]}' > timeline.json
+          echo '{"version":"1.0","mappings":{}}' > mappings.json
+          echo '{"version":"1.0","entries":[]}' > timeline.json
+          echo '{"version":"1.0","entries":[]}' > model-changelog.json
 
           git add -A
           git commit -m "Initialize architecture tracker data"
