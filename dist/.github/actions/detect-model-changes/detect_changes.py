@@ -147,6 +147,7 @@ def static_analysis(pr_files, components_data):
                             "description": desc,
                             "source_file": filepath,
                             "confidence": "medium",
+                            "source": "static",
                             "reasoning": f"新規ファイル {filepath} がパターン {rule['pattern']} にマッチ",
                         })
 
@@ -159,6 +160,7 @@ def static_analysis(pr_files, components_data):
                             "id": comp_id,
                             "source_file": filepath,
                             "confidence": "medium",
+                            "source": "static",
                             "reasoning": f"ファイル {filepath} が削除されたため",
                         })
 
@@ -327,6 +329,9 @@ def merge_llm_results(static_candidates, llm_result, existing_ids):
         if comp_id in static_by_id:
             static = static_by_id.pop(comp_id)
             proposal["source_file"] = static.get("source_file", "")
+            proposal["source"] = "static+llm"
+        else:
+            proposal["source"] = "llm"
 
         proposals.append(proposal)
 
@@ -353,6 +358,7 @@ def merge_llm_results(static_candidates, llm_result, existing_ids):
             "description": sanitize_string(rel.get("description", "")),
             "technology": sanitize_string(rel.get("technology", "")),
             "reasoning": sanitize_string(rel.get("reasoning", "")),
+            "source": "llm",
         })
 
     return proposals

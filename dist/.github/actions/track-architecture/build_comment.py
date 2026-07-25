@@ -2,12 +2,22 @@
 
 import argparse
 import json
+import re
 import sys
 import yaml
 
 
 # record-mapping/parse_checkboxes.py の NO_IMPACT_ID と同期が必要
 NO_IMPACT_ID = "__no_impact__"
+
+_MD_ESCAPE_RE = re.compile(r"([\[\]()|`<>])")
+
+
+def escape_markdown(text):
+    if not text:
+        return ""
+    text = text.replace("\r", " ").replace("\n", " ")
+    return _MD_ESCAPE_RE.sub(r"\\\1", text)
 
 
 def parse_args():
@@ -24,6 +34,26 @@ def parse_args():
         "--no-impact-default",
         action="store_true",
         help="Pre-check the no-impact checkbox (used when AI finds 0 components)",
+    )
+    parser.add_argument(
+        "--proposals",
+        default="",
+        help="JSON array of structural change proposals (from detect-changes)",
+    )
+    parser.add_argument(
+        "--detection-method",
+        default="",
+        help="Detection method used (static / static+llm)",
+    )
+    parser.add_argument(
+        "--repo",
+        default="",
+        help="Repository full name (owner/repo)",
+    )
+    parser.add_argument(
+        "--spa-url",
+        default="",
+        help="SPA base URL for editor link",
     )
     return parser.parse_args()
 
@@ -68,8 +98,76 @@ def build_no_impact_line(checked=False):
     return f"- [{mark}] `{NO_IMPACT_ID}` — 影響なし（このPRはアーキテクチャに影響しません）"
 
 
+def _source_label(source):
+    labels = {
+        "static": "静的解析",
+        "llm": "AI",
+        "static+llm": "静的解析 + AI",
+    }
+    return labels.get(source, source or "")
+
+
+def _action_label(proposal):
+    if proposal.get("target") == "relation":
+        return "Relation追加"
+    action = proposal.get("action", "add")
+    return {"add": "追加", "remove": "削除", "modify": "変更"}.get(action, escape_markdown(action))
+
+
+def _proposal_target(proposal):
+    if proposal.get("target") == "relation":
+        from_id = escape_markdown(proposal.get("from", ""))
+        to_id = escape_markdown(proposal.get("to", ""))
+        return f"`{from_id}` → `{to_id}`"
+    return f"`{escape_markdown(proposal.get('id', ''))}`"
+
+
+def _proposal_summary(proposal):
+    desc = escape_markdown(proposal.get("description", ""))
+    source = _source_label(proposal.get("source", ""))
+    if source:
+        return f"{desc}（{source}）"
+    return desc
+
+
+def build_proposals_section(proposals, detection_method, repo="", pr_number="",
+                            spa_url=""):
+    if not proposals:
+        return ""
+
+    method_label = "静的解析 + AI" if "llm" in detection_method else "静的解析"
+
+    lines = []
+    lines.append("### 🔄 構造変更の検出")
+    lines.append("")
+    lines.append(
+        f"このPRのマージにより、アーキテクチャモデルの構造変更が検出されました"
+        f"（検出: {method_label}）。"
+    )
+    lines.append("")
+    lines.append("| 種別 | 対象 | 概要 |")
+    lines.append("|------|------|------|")
+    for p in proposals:
+        action = _action_label(p)
+        target = _proposal_target(p)
+        summary = _proposal_summary(p)
+        lines.append(f"| {action} | {target} | {summary} |")
+    lines.append("")
+
+    if spa_url and repo:
+        owner, repo_name = repo.split("/", 1) if "/" in repo else ("", repo)
+        editor_url = f"{spa_url}/editor?owner={owner}&repo={repo_name}&pr={pr_number}"
+        lines.append(f"> 👉 [SPAで詳細を確認・編集する]({editor_url})")
+    else:
+        lines.append("> 構造変更はSPAのエディタから確認・適用してください。")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
 def build_comment(pr_number, pr_title, data, source="manual", ai_component_ids=None,
-                  no_impact_default=False):
+                  no_impact_default=False, proposals=None, detection_method="",
+                  repo="", spa_url=""):
     checkbox_section = build_checkbox_section(data, ai_component_ids)
 
     if source == "ai":
@@ -81,12 +179,23 @@ def build_comment(pr_number, pr_title, data, source="manual", ai_component_ids=N
     if source == "ai" and ai_component_ids:
         ai_marker = f"\n<!-- ai-components: {json.dumps(ai_component_ids, ensure_ascii=False)} -->"
 
+    proposals_markers = ""
+    if proposals:
+        proposals_markers = f"\n<!-- has-proposals: true -->\n<!-- detection-method: {detection_method} -->"
+
     no_impact_line = build_no_impact_line(checked=no_impact_default)
+
+    proposals_section = build_proposals_section(
+        proposals, detection_method, repo=repo, pr_number=pr_number, spa_url=spa_url)
+    if proposals_section:
+        proposals_block = f"\n{proposals_section}\n---\n"
+    else:
+        proposals_block = ""
 
     return f"""\
 ## 🏗 Architecture Tracker
 
-<!-- source: {source} -->{ai_marker}
+<!-- source: {source} -->{ai_marker}{proposals_markers}
 
 **PR #{pr_number}**: {pr_title}
 
@@ -98,7 +207,7 @@ def build_comment(pr_number, pr_title, data, source="manual", ai_component_ids=N
 {no_impact_line}
 
 ---
-<sub>🤖 このコメントは <a href="https://github.com/kenkenji/architecture-tracker">Architecture Tracker</a> が自動投稿しました</sub>"""
+{proposals_block}<sub>🤖 このコメントは <a href="https://github.com/kenkenji/architecture-tracker">Architecture Tracker</a> が自動投稿しました</sub>"""
 
 
 def main():
@@ -116,8 +225,14 @@ def main():
         if ai_ids:
             source = "ai"
 
+    proposals = []
+    if args.proposals:
+        proposals = json.loads(args.proposals)
+
     print(build_comment(args.pr_number, args.pr_title, data, source=source,
-                        ai_component_ids=ai_ids, no_impact_default=args.no_impact_default))
+                        ai_component_ids=ai_ids, no_impact_default=args.no_impact_default,
+                        proposals=proposals, detection_method=args.detection_method,
+                        repo=args.repo, spa_url=args.spa_url))
 
 
 if __name__ == "__main__":
