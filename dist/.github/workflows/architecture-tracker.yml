@@ -54,7 +54,7 @@ jobs:
           config_yaml=$(gh api "repos/${REPO}/contents/config.yaml?ref=_architecture-tracker" \
             --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || echo "")
           if [ -n "$config_yaml" ]; then
-            model=$(echo "$config_yaml" | grep -A1 '^llm:' | grep 'model:' | sed 's/.*model:[[:space:]]*//' | sed 's/[[:space:]]*#.*//' | tr -d '[:space:]')
+            model=$(echo "$config_yaml" | grep -A1 '^llm:' | grep 'model:' | sed 's/.*model:[[:space:]]*//' | sed 's/[[:space:]]*#.*//' | tr -d '[:space:]' || true)
             echo "model=${model}" >> "$GITHUB_OUTPUT"
           else
             echo "model=" >> "$GITHUB_OUTPUT"
@@ -109,9 +109,9 @@ jobs:
           config_yaml=$(gh api "repos/${REPO}/contents/config.yaml?ref=_architecture-tracker" \
             --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || echo "")
           if [ -n "$config_yaml" ]; then
-            model=$(echo "$config_yaml" | grep -A1 '^llm:' | grep 'model:' | sed 's/.*model:[[:space:]]*//' | sed 's/[[:space:]]*#.*//' | tr -d '[:space:]')
+            model=$(echo "$config_yaml" | grep -A1 '^llm:' | grep 'model:' | sed 's/.*model:[[:space:]]*//' | sed 's/[[:space:]]*#.*//' | tr -d '[:space:]' || true)
             echo "model=${model}" >> "$GITHUB_OUTPUT"
-            spa_url=$(echo "$config_yaml" | grep -A1 '^spa:' | grep 'url:' | sed 's/.*url:[[:space:]]*//' | sed 's/[[:space:]]*#.*//' | tr -d '[:space:]' | sed 's/^"\(.*\)"$/\1/' | sed "s/^'\(.*\)'$/\1/")
+            spa_url=$(echo "$config_yaml" | grep -A1 '^spa:' | grep 'url:' | sed 's/.*url:[[:space:]]*//' | sed 's/[[:space:]]*#.*//' | tr -d '[:space:]' | sed 's/^"\(.*\)"$/\1/' | sed "s/^'\(.*\)'$/\1/" || true)
             echo "spa_url=${spa_url}" >> "$GITHUB_OUTPUT"
           else
             echo "model=" >> "$GITHUB_OUTPUT"
