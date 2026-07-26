@@ -45,6 +45,10 @@ inputs:
     description: "PR title (override for workflow_dispatch)"
     required: false
     default: ""
+  mode:
+    description: "Operation mode: 'new' for initial post, 'regenerate' for updating existing comment"
+    required: false
+    default: "new"
 
 runs:
   using: "composite"
@@ -60,25 +64,70 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
         PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
         REPO: ${{ github.repository }}
+        MODE: ${{ inputs.mode }}
       run: |
         set -euo pipefail
 
         MARKER="## 🏗 Architecture Tracker"
-        existing=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+        comment_id=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
           --paginate \
           --jq ".[] | select(.body | startswith(\"${MARKER}\")) | .id" \
           | head -1)
 
-        if [ -n "$existing" ]; then
-          echo "✅ Architecture Tracker comment already exists on PR #${PR_NUMBER}, skipping."
-          echo "already_posted=true" >> "$GITHUB_OUTPUT"
-        else
+        if [ "$MODE" = "regenerate" ]; then
+          if [ -z "$comment_id" ]; then
+            echo "::error::Regenerate mode but no existing Architecture Tracker comment found on PR #${PR_NUMBER}"
+            exit 1
+          fi
+          echo "comment_id=${comment_id}" >> "$GITHUB_OUTPUT"
           echo "already_posted=false" >> "$GITHUB_OUTPUT"
+
+          body_file=$(mktemp --suffix=.txt)
+          gh api "repos/${REPO}/issues/comments/${comment_id}" --jq '.body' > "$body_file"
+          echo "existing_body_file=${body_file}" >> "$GITHUB_OUTPUT"
+
+          echo "🔄 Regenerate mode: found existing comment ${comment_id} on PR #${PR_NUMBER}"
+        else
+          if [ -n "$comment_id" ]; then
+            echo "✅ Architecture Tracker comment already exists on PR #${PR_NUMBER}, skipping."
+            echo "already_posted=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already_posted=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "comment_id=" >> "$GITHUB_OUTPUT"
+          echo "existing_body_file=" >> "$GITHUB_OUTPUT"
         fi
+
+    - name: Extract existing comment state (regenerate mode)
+      id: extract-existing
+      if: inputs.mode == 'regenerate'
+      shell: bash
+      env:
+        EXISTING_BODY_FILE: ${{ steps.check.outputs.existing_body_file }}
+        ACTION_PATH: ${{ github.action_path }}
+        PARSE_CHECKBOXES_PATH: ${{ github.workspace }}/.github/actions/record-mapping
+      run: |
+        set -euo pipefail
+
+        result=$(COMMENT_BODY="$(cat "$EXISTING_BODY_FILE")" \
+          python3 "${PARSE_CHECKBOXES_PATH}/parse_checkboxes.py")
+
+        checked=$(echo "$result" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin)['components']))")
+        source=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['source'])")
+        ai_components=$(echo "$result" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin)['ai_components']))")
+        no_impact=$(echo "$result" | python3 -c "import sys,json; print('true' if json.load(sys.stdin)['no_impact'] else 'false')")
+
+        echo "checked_components=${checked}" >> "$GITHUB_OUTPUT"
+        echo "source=${source}" >> "$GITHUB_OUTPUT"
+        echo "ai_components=${ai_components}" >> "$GITHUB_OUTPUT"
+        echo "no_impact=${no_impact}" >> "$GITHUB_OUTPUT"
+
+        rm -f "$EXISTING_BODY_FILE"
+        echo "📋 Extracted existing state: source=${source}, checked=$(echo "$checked" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" ) components, no_impact=${no_impact}"
 
     - name: Extract components via LLM
       id: extract
-      if: steps.check.outputs.already_posted != 'true'
+      if: steps.check.outputs.already_posted != 'true' && inputs.mode != 'regenerate'
       continue-on-error: true
       uses: ./.github/actions/extract-components
       with:
@@ -89,8 +138,9 @@ runs:
         claude-code-oauth-token: ${{ inputs.claude-code-oauth-token }}
         model: ${{ inputs.model }}
 
-    - name: Fetch components and post comment
+    - name: Fetch components and build comment
       if: steps.check.outputs.already_posted != 'true'
+      id: build
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
@@ -99,6 +149,7 @@ runs:
         PR_TITLE: ${{ inputs.pr-title || github.event.pull_request.title }}
         REPO: ${{ github.repository }}
         ACTION_PATH: ${{ github.action_path }}
+        MODE: ${{ inputs.mode }}
         AI_COMPONENTS: ${{ steps.extract.outputs.components }}
         AI_SKIPPED: ${{ steps.extract.outputs.skipped }}
         AI_PROVIDER: ${{ steps.extract.outputs.provider }}
@@ -106,6 +157,10 @@ runs:
         PROPOSALS: ${{ inputs.proposals }}
         DETECTION_METHOD: ${{ inputs.detection-method }}
         SPA_URL: ${{ inputs.spa-url }}
+        EXISTING_CHECKED: ${{ steps.extract-existing.outputs.checked_components }}
+        EXISTING_SOURCE: ${{ steps.extract-existing.outputs.source }}
+        EXISTING_AI_COMPONENTS: ${{ steps.extract-existing.outputs.ai_components }}
+        EXISTING_NO_IMPACT: ${{ steps.extract-existing.outputs.no_impact }}
       run: |
         set -euo pipefail
 
@@ -123,20 +178,36 @@ runs:
 
         extra_args=()
         ai_notice=""
-        if [ "$AI_OUTCOME" = "success" ] && [ "$AI_SKIPPED" != "true" ] && [ -n "$AI_COMPONENTS" ] && [ "$AI_COMPONENTS" != "[]" ]; then
-          extra_args=(--ai-components "$AI_COMPONENTS")
-          echo "🤖 AI extraction succeeded (provider: ${AI_PROVIDER}), posting AI proposal comment"
+
+        if [ "$MODE" = "regenerate" ]; then
+          # 再生成: 既存コメントの状態を復元
+          if [ -n "$EXISTING_AI_COMPONENTS" ] && [ "$EXISTING_AI_COMPONENTS" != "[]" ]; then
+            extra_args=(--ai-components "$EXISTING_AI_COMPONENTS")
+          fi
+          if [ -n "$EXISTING_CHECKED" ] && [ "$EXISTING_CHECKED" != "[]" ]; then
+            extra_args+=(--checked-components "$EXISTING_CHECKED")
+          fi
+          if [ "$EXISTING_NO_IMPACT" = "true" ]; then
+            extra_args+=(--no-impact-checked)
+          fi
+          echo "🔄 Regenerating comment with existing state (source: ${EXISTING_SOURCE})"
         else
-          if [ "$AI_OUTCOME" != "success" ]; then
-            echo "⚠️ AI extraction failed, falling back to manual mapping comment"
-            echo "::warning::AI抽出に失敗しました。手動モードでコメントを投稿します。モデルIDの廃止やAPIキー設定を確認してください。"
-            ai_notice=$'\n\n> ⚠️ AI抽出に失敗しました（手動モードで投稿）。モデルIDの廃止やAPIキー設定を確認してください。'
-          elif [ "$AI_SKIPPED" != "true" ]; then
-            echo "🤖 AI extraction succeeded but found no matching components (provider: ${AI_PROVIDER})"
-            extra_args=(--no-impact-default)
-            ai_notice=$'\n\n> ℹ️ AI抽出の結果、影響コンポーネントは検出されませんでした。該当がある場合は手動で選択してください。'
+          # 新規: LLM抽出結果を使用
+          if [ "$AI_OUTCOME" = "success" ] && [ "$AI_SKIPPED" != "true" ] && [ -n "$AI_COMPONENTS" ] && [ "$AI_COMPONENTS" != "[]" ]; then
+            extra_args=(--ai-components "$AI_COMPONENTS")
+            echo "🤖 AI extraction succeeded (provider: ${AI_PROVIDER}), posting AI proposal comment"
           else
-            echo "📝 No AI extraction available, posting manual mapping comment"
+            if [ "$AI_OUTCOME" != "success" ]; then
+              echo "⚠️ AI extraction failed, falling back to manual mapping comment"
+              echo "::warning::AI抽出に失敗しました。手動モードでコメントを投稿します。モデルIDの廃止やAPIキー設定を確認してください。"
+              ai_notice=$'\n\n> ⚠️ AI抽出に失敗しました（手動モードで投稿）。モデルIDの廃止やAPIキー設定を確認してください。'
+            elif [ "$AI_SKIPPED" != "true" ]; then
+              echo "🤖 AI extraction succeeded but found no matching components (provider: ${AI_PROVIDER})"
+              extra_args=(--no-impact-default)
+              ai_notice=$'\n\n> ℹ️ AI抽出の結果、影響コンポーネントは検出されませんでした。該当がある場合は手動で選択してください。'
+            else
+              echo "📝 No AI extraction available, posting manual mapping comment"
+            fi
           fi
         fi
 
@@ -148,7 +219,7 @@ runs:
           if [ -n "$SPA_URL" ]; then
             extra_args+=(--spa-url "$SPA_URL")
           fi
-          echo "📋 Including ${DETECTION_METHOD} structural change proposals in comment"
+          echo "📋 Including structural change proposals in comment"
         fi
 
         comment_file=$(mktemp --suffix=.md)
@@ -164,15 +235,42 @@ runs:
         fi
 
         rm -f "$components_file"
+        echo "comment_file=${comment_file}" >> "$GITHUB_OUTPUT"
 
+    - name: Post new comment
+      if: steps.check.outputs.already_posted != 'true' && inputs.mode != 'regenerate'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        COMMENT_FILE: ${{ steps.build.outputs.comment_file }}
+      run: |
+        set -euo pipefail
         echo "Posting comment to PR #${PR_NUMBER}"
-        gh pr comment "$PR_NUMBER" --body-file "$comment_file" --repo "$REPO"
-
-        rm -f "$comment_file"
+        gh pr comment "$PR_NUMBER" --body-file "$COMMENT_FILE" --repo "$REPO"
+        rm -f "$COMMENT_FILE"
         echo "✅ Architecture tracking comment posted successfully"
 
+    - name: Update existing comment (regenerate mode)
+      if: inputs.mode == 'regenerate'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        COMMENT_ID: ${{ steps.check.outputs.comment_id }}
+        COMMENT_FILE: ${{ steps.build.outputs.comment_file }}
+      run: |
+        set -euo pipefail
+        echo "Updating existing comment ${COMMENT_ID}"
+        gh api "repos/${REPO}/issues/comments/${COMMENT_ID}" \
+          --method PATCH \
+          --field body=@"$COMMENT_FILE"
+        rm -f "$COMMENT_FILE"
+        echo "✅ Architecture tracking comment updated successfully"
+
     - name: Create tracking issue
-      if: steps.check.outputs.already_posted != 'true'
+      if: steps.check.outputs.already_posted != 'true' && inputs.mode != 'regenerate'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}

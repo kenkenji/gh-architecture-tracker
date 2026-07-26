@@ -55,14 +55,29 @@ def parse_args():
         default="",
         help="SPA base URL for editor link",
     )
+    parser.add_argument(
+        "--checked-components",
+        default="",
+        help="JSON array of currently checked component IDs (for regeneration)",
+    )
+    parser.add_argument(
+        "--no-impact-checked",
+        action="store_true",
+        help="Pre-check the no-impact checkbox (for regeneration)",
+    )
     return parser.parse_args()
 
 
-def build_checkbox_section(data, ai_component_ids=None):
+def build_checkbox_section(data, ai_component_ids=None, checked_ids=None):
     if ai_component_ids is None:
         ai_component_ids = set()
     else:
         ai_component_ids = set(ai_component_ids)
+
+    if checked_ids is not None:
+        pre_checked = set(checked_ids) | ai_component_ids
+    else:
+        pre_checked = ai_component_ids
 
     components = data.get("components", [])
 
@@ -80,12 +95,12 @@ def build_checkbox_section(data, ai_component_ids=None):
         lines.append(f"### {container['name']}{system_label}")
         lines.append("")
 
-        check = "x" if container["id"] in ai_component_ids else " "
+        check = "x" if container["id"] in pre_checked else " "
         lines.append(f"- [{check}] `{container['id']}` — {container['name']}")
 
         children = [c for c in component_items if c.get("parent") == container["id"]]
         for child in children:
-            check = "x" if child["id"] in ai_component_ids else " "
+            check = "x" if child["id"] in pre_checked else " "
             lines.append(f"  - [{check}] `{child['id']}` — {child['name']}")
 
         lines.append("")
@@ -130,12 +145,21 @@ def _proposal_summary(proposal):
     return desc
 
 
+def _status_label(status):
+    labels = {
+        "accepted": "✅ 適用",
+        "rejected": "❌ 却下",
+    }
+    return labels.get(status, "")
+
+
 def build_proposals_section(proposals, detection_method, repo="", pr_number="",
                             spa_url=""):
     if not proposals:
         return ""
 
     method_label = "静的解析 + AI" if "llm" in detection_method else "静的解析"
+    has_status = any(p.get("status") in ("accepted", "rejected") for p in proposals)
 
     lines = []
     lines.append("### 🔄 構造変更の検出")
@@ -145,13 +169,21 @@ def build_proposals_section(proposals, detection_method, repo="", pr_number="",
         f"（検出: {method_label}）。"
     )
     lines.append("")
-    lines.append("| 種別 | 対象 | 概要 |")
-    lines.append("|------|------|------|")
+    if has_status:
+        lines.append("| 種別 | 対象 | 概要 | 状態 |")
+        lines.append("|------|------|------|------|")
+    else:
+        lines.append("| 種別 | 対象 | 概要 |")
+        lines.append("|------|------|------|")
     for p in proposals:
         action = _action_label(p)
         target = _proposal_target(p)
         summary = _proposal_summary(p)
-        lines.append(f"| {action} | {target} | {summary} |")
+        if has_status:
+            status = _status_label(p.get("status", ""))
+            lines.append(f"| {action} | {target} | {summary} | {status} |")
+        else:
+            lines.append(f"| {action} | {target} | {summary} |")
     lines.append("")
 
     if spa_url and repo:
@@ -167,8 +199,9 @@ def build_proposals_section(proposals, detection_method, repo="", pr_number="",
 
 def build_comment(pr_number, pr_title, data, source="manual", ai_component_ids=None,
                   no_impact_default=False, proposals=None, detection_method="",
-                  repo="", spa_url=""):
-    checkbox_section = build_checkbox_section(data, ai_component_ids)
+                  repo="", spa_url="", checked_ids=None):
+    checkbox_section = build_checkbox_section(data, ai_component_ids,
+                                              checked_ids=checked_ids)
 
     if source == "ai":
         intro = "AIがこのPRの影響コンポーネントを提案しました（✅ = AI提案済み）。必要に応じて修正してください。"
@@ -197,7 +230,7 @@ def build_comment(pr_number, pr_title, data, source="manual", ai_component_ids=N
 
 <!-- source: {source} -->{ai_marker}{proposals_markers}
 
-**PR #{pr_number}**: {pr_title}
+**PR #{pr_number}**: {escape_markdown(pr_title)}
 
 {intro}
 
@@ -229,10 +262,17 @@ def main():
     if args.proposals:
         proposals = json.loads(args.proposals)
 
+    checked_ids = None
+    if args.checked_components:
+        checked_ids = json.loads(args.checked_components)
+
+    no_impact = args.no_impact_default or args.no_impact_checked
+
     print(build_comment(args.pr_number, args.pr_title, data, source=source,
-                        ai_component_ids=ai_ids, no_impact_default=args.no_impact_default,
+                        ai_component_ids=ai_ids, no_impact_default=no_impact,
                         proposals=proposals, detection_method=args.detection_method,
-                        repo=args.repo, spa_url=args.spa_url))
+                        repo=args.repo, spa_url=args.spa_url,
+                        checked_ids=checked_ids))
 
 
 if __name__ == "__main__":

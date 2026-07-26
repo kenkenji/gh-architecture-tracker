@@ -12,9 +12,11 @@ on:
       pr-number:
         description: "検出対象のPR番号（手動実行時）"
         required: true
+  repository_dispatch:
+    types: [regenerate-comment]
 
 concurrency:
-  group: architecture-tracker-data
+  group: architecture-tracker-${{ github.event_name == 'repository_dispatch' && 'regenerate' || 'data' }}
   cancel-in-progress: false
 
 jobs:
@@ -23,14 +25,15 @@ jobs:
       (github.event_name == 'pull_request'
        && github.event.pull_request.merged == true)
       || github.event_name == 'workflow_dispatch'
+      || github.event_name == 'repository_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
     outputs:
-      proposals: ${{ steps.detect-action.outputs.proposals }}
-      proposal-count: ${{ steps.detect-action.outputs.proposal-count }}
-      detection-method: ${{ steps.detect-action.outputs.detection-method }}
+      proposals: ${{ steps.detect-action.outputs.proposals || steps.passthrough.outputs.proposals }}
+      proposal-count: ${{ steps.detect-action.outputs.proposal-count || steps.passthrough.outputs.proposal-count }}
+      detection-method: ${{ steps.detect-action.outputs.detection-method || steps.passthrough.outputs.detection-method }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -43,8 +46,78 @@ jobs:
           app-id: ${{ vars.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
+      - name: Validate PR (repository_dispatch)
+        if: github.event_name == 'repository_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PR_NUMBER" ] || ! echo "$PR_NUMBER" | grep -qE '^[0-9]+$'; then
+            echo "::error::Invalid pr_number in client_payload: '${PR_NUMBER}'"
+            exit 1
+          fi
+          merged=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged')
+          if [ "$merged" != "true" ]; then
+            echo "::error::PR #${PR_NUMBER} is not merged"
+            exit 1
+          fi
+          echo "✅ PR #${PR_NUMBER} is merged, proceeding with regeneration"
+
+      - name: Read existing proposals (repository_dispatch passthrough)
+        id: passthrough
+        if: github.event_name == 'repository_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+        run: |
+          set -euo pipefail
+
+          # resolved_at 確認付きリトライ（設計ドキュメント準拠: 最大3回、5秒間隔）
+          for attempt in 1 2 3; do
+            proposals_json=$(gh api "repos/${REPO}/contents/proposals/pr-${PR_NUMBER}.json?ref=_architecture-tracker" \
+              --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+
+            if [ -z "$proposals_json" ]; then
+              echo "::error::proposals/pr-${PR_NUMBER}.json not found on _architecture-tracker branch"
+              exit 1
+            fi
+
+            resolved_at=$(echo "$proposals_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('resolved_at', ''))")
+            if [ -n "$resolved_at" ]; then
+              break
+            fi
+
+            if [ "$attempt" -lt 3 ]; then
+              echo "⏳ resolved_at not yet set (attempt ${attempt}/3), retrying in 5s..."
+              sleep 5
+            else
+              echo "::warning::proposals/pr-${PR_NUMBER}.json has no resolved_at after 3 attempts, proceeding anyway"
+            fi
+          done
+
+          proposals=$(echo "$proposals_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d.get('proposals', [])))")
+          proposal_count=$(echo "$proposals" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
+          detection_method=$(echo "$proposals_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('detection_method', 'static'))")
+
+          delimiter="GHEOF_$(openssl rand -hex 8)"
+          {
+            echo "proposals<<${delimiter}"
+            echo "${proposals}"
+            echo "${delimiter}"
+          } >> "$GITHUB_OUTPUT"
+          echo "proposal-count=${proposal_count}" >> "$GITHUB_OUTPUT"
+          echo "detection-method=${detection_method}" >> "$GITHUB_OUTPUT"
+
+          echo "📋 Passthrough: ${proposal_count} existing proposal(s) (method: ${detection_method})"
+
       - name: Fetch config from data branch
         id: config
+        if: github.event_name != 'repository_dispatch'
         shell: bash
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
@@ -62,6 +135,7 @@ jobs:
 
       - name: Detect model changes
         id: detect-action
+        if: github.event_name != 'repository_dispatch'
         uses: ./.github/actions/detect-model-changes
         with:
           github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
@@ -79,7 +153,8 @@ jobs:
        && github.event.review.state == 'approved')
       || (github.event_name == 'pull_request'
        && github.event.pull_request.merged == true)
-      || github.event_name == 'workflow_dispatch')
+      || github.event_name == 'workflow_dispatch'
+      || github.event_name == 'repository_dispatch')
     needs: detect-changes
     runs-on: ubuntu-latest
     permissions:
@@ -131,6 +206,19 @@ jobs:
           pr_title=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.title')
           echo "pr_title=${pr_title}" >> "$GITHUB_OUTPUT"
 
+      - name: Fetch PR info for repository_dispatch
+        id: pr-info-dispatch
+        if: github.event_name == 'repository_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+        run: |
+          set -euo pipefail
+          pr_title=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.title')
+          echo "pr_title=${pr_title}" >> "$GITHUB_OUTPUT"
+
       - name: Track architecture
         uses: ./.github/actions/track-architecture
         with:
@@ -143,8 +231,9 @@ jobs:
           proposals: ${{ needs.detect-changes.outputs.proposals }}
           detection-method: ${{ needs.detect-changes.outputs.detection-method }}
           spa-url: ${{ steps.config.outputs.spa_url }}
-          pr-number: ${{ github.event.inputs.pr-number }}
-          pr-title: ${{ steps.pr-info.outputs.pr_title }}
+          pr-number: ${{ github.event.inputs.pr-number || github.event.client_payload.pr_number }}
+          pr-title: ${{ steps.pr-info.outputs.pr_title || steps.pr-info-dispatch.outputs.pr_title }}
+          mode: ${{ github.event_name == 'repository_dispatch' && 'regenerate' || 'new' }}
 
   merge-catchup:
     if: >-
