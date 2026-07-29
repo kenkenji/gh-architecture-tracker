@@ -141,12 +141,6 @@ jobs:
             echo "4. Save をクリック"
           fi
 
-      - name: Deploy SPA
-        uses: ./.github/actions/deploy-spa
-        with:
-          github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
-          repository-name: ${{ github.event.repository.name }}
-
       - name: Show deployment URL
         shell: bash
         env:

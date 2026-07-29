@@ -121,10 +121,14 @@ deploy_spa_to_ghpages() {
   find "$work_dir" -mindepth 1 -maxdepth 1 -not -name '.git' -exec rm -rf {} +
   cp -r "${spa_dist}/." "$work_dir/"
 
-  # ベースパスを注入
+  # ベースパスとリポジトリ情報を注入
+  local owner
+  owner=$(gh repo view --json owner --jq '.owner.login' 2>/dev/null || git remote get-url origin 2>/dev/null | sed 's|.*github\.com[:/]\([^/]*\)/.*|\1|' || echo "")
   for f in "${work_dir}/index.html" "${work_dir}/404.html"; do
     if [ -f "$f" ]; then
       sed_inplace "s|__AT_BASE_PATH__ = '/'|__AT_BASE_PATH__ = '/${repo_name}/'|" "$f"
+      sed_inplace "s|__AT_REPO_OWNER__ = ''|__AT_REPO_OWNER__ = '${owner}'|" "$f"
+      sed_inplace "s|__AT_REPO_NAME__ = ''|__AT_REPO_NAME__ = '${repo_name}'|" "$f"
     fi
   done
 
