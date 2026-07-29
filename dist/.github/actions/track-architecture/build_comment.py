@@ -43,7 +43,7 @@ def parse_args():
     parser.add_argument(
         "--detection-method",
         default="",
-        help="Detection method used (static / static+llm)",
+        help="Detection method used (llm / none / skip)",
     )
     parser.add_argument(
         "--spa-url",
@@ -110,9 +110,7 @@ def build_no_impact_line(checked=False):
 
 def _source_label(source):
     labels = {
-        "static": "静的解析",
         "llm": "AI",
-        "static+llm": "静的解析 + AI",
     }
     return labels.get(source, source or "")
 
@@ -148,12 +146,11 @@ def _status_label(status):
     return labels.get(status, "")
 
 
-def build_proposals_section(proposals, detection_method, pr_number="",
-                            spa_url=""):
+def build_proposals_section(proposals, detection_method, pr_number=""):
     if not proposals:
         return ""
 
-    method_label = "静的解析 + AI" if "llm" in detection_method else "静的解析"
+    method_label = "AI" if detection_method == "llm" else detection_method
     has_status = any(p.get("status") in ("accepted", "rejected") for p in proposals)
 
     lines = []
@@ -180,13 +177,15 @@ def build_proposals_section(proposals, detection_method, pr_number="",
         else:
             lines.append(f"| {action} | {target} | {summary} |")
     lines.append("")
+    return "\n".join(lines)
 
-    if spa_url:
-        editor_url = f"{spa_url}/editor?pr={pr_number}"
-        lines.append(f"> 👉 [SPAで詳細を確認・編集する]({editor_url})")
-    else:
-        lines.append("> 構造変更はSPAのエディタから確認・適用してください。")
 
+def build_editor_link_section(spa_url, pr_number=""):
+    if not spa_url:
+        return ""
+    editor_url = f"{spa_url}/editor?pr={pr_number}"
+    lines = []
+    lines.append(f"> 📝 [アーキテクチャモデルを編集する]({editor_url})")
     lines.append("")
     return "\n".join(lines)
 
@@ -213,9 +212,12 @@ def build_comment(pr_number, pr_title, data, source="manual", ai_component_ids=N
     no_impact_line = build_no_impact_line(checked=no_impact_default)
 
     proposals_section = build_proposals_section(
-        proposals, detection_method, pr_number=pr_number, spa_url=spa_url)
-    if proposals_section:
-        proposals_block = f"\n{proposals_section}\n---\n"
+        proposals, detection_method, pr_number=pr_number)
+    editor_link_section = build_editor_link_section(spa_url, pr_number=pr_number)
+
+    extra_sections = f"{proposals_section}{editor_link_section}"
+    if extra_sections.strip():
+        proposals_block = f"\n{extra_sections}\n---\n"
     else:
         proposals_block = ""
 

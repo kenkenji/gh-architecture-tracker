@@ -37,7 +37,7 @@ outputs:
     description: "Number of proposals detected"
     value: ${{ steps.detect.outputs.proposal_count }}
   detection-method:
-    description: "Detection method used (static or static+llm)"
+    description: "Detection method used (llm, none, or skip)"
     value: ${{ steps.detect.outputs.detection_method }}
 
 runs:
@@ -142,7 +142,7 @@ runs:
 
         proposals=$(echo "$result" | python3 -c "import sys, json; d=json.load(sys.stdin); print(json.dumps(d.get('proposals', [])))")
         proposal_count=$(echo "$proposals" | python3 -c "import sys, json; print(len(json.load(sys.stdin)))")
-        detection_method=$(echo "$result" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('detection_method', 'static'))")
+        detection_method=$(echo "$result" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('detection_method', 'none'))")
 
         {
           echo "proposals<<GHEOF_DETECT_END"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 PRの変更ファイルからアーキテクチャモデルの変更候補を検出する。
-静的解析（ファイルパスパターンマッチ）+ オプションのLLM判断。
+LLMベースの分析により、PR本文と変更ファイルから構造変更を提案する。
 """
 
 import argparse
@@ -18,47 +18,6 @@ import yaml
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
 DEFAULT_OPENAI_MODEL = "gpt-4o"
 
-PATH_RULES = [
-    {
-        "pattern": "spa/src/pages/*.tsx",
-        "suggestion": "add_component",
-        "parent": "web-app",
-        "level": "component",
-        "technology": "React + TypeScript",
-        "description_template": "{name} ページコンポーネント",
-    },
-    {
-        "pattern": "spa/src/context/*.tsx",
-        "suggestion": "add_component",
-        "parent": "web-app",
-        "level": "component",
-        "technology": "React Context",
-        "description_template": "{name} コンテキスト",
-    },
-    {
-        "pattern": "spa/src/api/*.ts",
-        "suggestion": "add_component",
-        "parent": "web-app",
-        "level": "component",
-        "technology": "TypeScript",
-        "description_template": "{name} APIモジュール",
-    },
-    {
-        "pattern": ".github/actions/*/action.yml",
-        "suggestion": "add_component",
-        "parent": "github-actions",
-        "level": "component",
-        "technology": "Python",
-        "description_template": "{name} Composite Action",
-    },
-    {
-        "pattern": ".github/workflows/*.yml",
-        "suggestion": "modify_component",
-        "target": "pr-trigger",
-        "field": "technology",
-    },
-]
-
 SKIP_PATTERNS = [
     "docs/**",
     "*.md",
@@ -68,37 +27,6 @@ SKIP_PATTERNS = [
 ]
 
 ID_PATTERN = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
-
-
-def pascal_to_kebab(name):
-    s = re.sub(r"([A-Z])", r"-\1", name).lower().lstrip("-")
-    return re.sub(r"-+", "-", s)
-
-
-def file_to_component_id(filepath, rule):
-    if rule["pattern"].startswith(".github/actions/"):
-        parts = filepath.replace("\\", "/").split("/")
-        idx = parts.index("actions") if "actions" in parts else -1
-        if idx >= 0 and idx + 1 < len(parts):
-            return parts[idx + 1]
-        return None
-
-    basename = filepath.replace("\\", "/").split("/")[-1]
-    name_part = basename.rsplit(".", 1)[0]
-    return pascal_to_kebab(name_part)
-
-
-def file_to_human_name(filepath, rule):
-    if rule["pattern"].startswith(".github/actions/"):
-        parts = filepath.replace("\\", "/").split("/")
-        idx = parts.index("actions") if "actions" in parts else -1
-        if idx >= 0 and idx + 1 < len(parts):
-            return parts[idx + 1]
-        return None
-
-    basename = filepath.replace("\\", "/").split("/")[-1]
-    name_part = basename.rsplit(".", 1)[0]
-    return name_part
 
 
 def is_doc_or_test_only(files):
@@ -116,64 +44,6 @@ def is_doc_or_test_only(files):
 
 def get_existing_ids(components_data):
     return {c["id"] for c in components_data.get("components", [])}
-
-
-def static_analysis(pr_files, components_data):
-    existing_ids = get_existing_ids(components_data)
-    candidates = []
-
-    for f in pr_files:
-        filepath = f["filename"]
-        status = f.get("status", "modified")
-
-        for rule in PATH_RULES:
-            if not fnmatch.fnmatch(filepath, rule["pattern"]):
-                continue
-
-            if rule["suggestion"] == "add_component":
-                if status in ("added", "modified"):
-                    comp_id = file_to_component_id(filepath, rule)
-                    if comp_id and comp_id not in existing_ids:
-                        human_name = file_to_human_name(filepath, rule)
-                        desc = rule["description_template"].format(name=human_name)
-                        candidates.append({
-                            "action": "add",
-                            "target": "component",
-                            "id": comp_id,
-                            "name": human_name,
-                            "level": rule["level"],
-                            "parent": rule["parent"],
-                            "technology": rule["technology"],
-                            "description": desc,
-                            "source_file": filepath,
-                            "confidence": "medium",
-                            "source": "static",
-                            "reasoning": f"新規ファイル {filepath} がパターン {rule['pattern']} にマッチ",
-                        })
-
-                elif status == "removed":
-                    comp_id = file_to_component_id(filepath, rule)
-                    if comp_id and comp_id in existing_ids:
-                        candidates.append({
-                            "action": "remove",
-                            "target": "component",
-                            "id": comp_id,
-                            "source_file": filepath,
-                            "confidence": "medium",
-                            "source": "static",
-                            "reasoning": f"ファイル {filepath} が削除されたため",
-                        })
-
-            elif rule["suggestion"] == "modify_component":
-                pass
-
-    seen_ids = set()
-    deduped = []
-    for c in candidates:
-        if c["id"] not in seen_ids:
-            seen_ids.add(c["id"])
-            deduped.append(c)
-    return deduped
 
 
 def detect_provider():
@@ -292,9 +162,8 @@ def validate_id(comp_id):
     return bool(ID_PATTERN.match(comp_id))
 
 
-def merge_llm_results(static_candidates, llm_result, existing_ids):
+def validate_llm_results(llm_result, existing_ids):
     proposals = []
-    static_by_id = {c["id"]: c for c in static_candidates}
 
     for p in llm_result.get("proposals", []):
         if p.get("confidence") == "low":
@@ -313,7 +182,7 @@ def merge_llm_results(static_candidates, llm_result, existing_ids):
         if action == "remove" and comp_id not in existing_ids:
             continue
 
-        proposal = {
+        proposals.append({
             "action": action,
             "target": p.get("target", "component"),
             "id": comp_id,
@@ -324,19 +193,8 @@ def merge_llm_results(static_candidates, llm_result, existing_ids):
             "description": sanitize_string(p.get("description", "")),
             "confidence": p.get("confidence", "medium"),
             "reasoning": sanitize_string(p.get("reasoning", "")),
-        }
-
-        if comp_id in static_by_id:
-            static = static_by_id.pop(comp_id)
-            proposal["source_file"] = static.get("source_file", "")
-            proposal["source"] = "static+llm"
-        else:
-            proposal["source"] = "llm"
-
-        proposals.append(proposal)
-
-    for comp_id, static in static_by_id.items():
-        proposals.append(static)
+            "source": "llm",
+        })
 
     for rel in llm_result.get("new_relations", []):
         from_id = rel.get("from", "")
@@ -364,14 +222,12 @@ def merge_llm_results(static_candidates, llm_result, existing_ids):
     return proposals
 
 
-def build_llm_prompt(template, static_candidates, pr_body, pr_files, components_data):
+def build_llm_prompt(template, pr_body, pr_files, components_data):
     components_text = format_components_for_prompt(components_data)
-    candidates_text = json.dumps(static_candidates, ensure_ascii=False, indent=2)
     files_text = "\n".join(f"- `{f['filename']}` ({f.get('status', 'modified')})" for f in pr_files)
 
     return (template
             .replace("{components}", components_text)
-            .replace("{candidates}", candidates_text)
             .replace("{pr_description}", pr_body or "(PR Descriptionなし)")
             .replace("{changed_files}", files_text))
 
@@ -412,7 +268,7 @@ def main():
     parser.add_argument("--prompt-template", default="",
                         help="LLMプロンプトテンプレートファイルのパス")
     parser.add_argument("--mode", choices=["static", "full"], default="full",
-                        help="検出モード (static: 静的解析のみ, full: 静的+LLM)")
+                        help="検出モード (static: LLMスキップ, full: LLMで検出)")
     parser.add_argument("--model", default="",
                         help="LLMモデル名")
     args = parser.parse_args()
@@ -431,15 +287,12 @@ def main():
     if is_doc_or_test_only(pr_files):
         print(json.dumps({
             "proposals": [],
-            "detection_method": "static",
+            "detection_method": "skip",
             "skipped_reason": "doc_or_test_only",
         }))
         return
 
-    static_candidates = static_analysis(pr_files, components_data)
-    detection_method = "static"
-
-    if args.mode == "full" and static_candidates:
+    if args.mode == "full":
         provider = detect_provider()
 
         if provider:
@@ -450,7 +303,7 @@ def main():
 
             if template:
                 prompt = build_llm_prompt(
-                    template, static_candidates, pr_body, pr_files, components_data)
+                    template, pr_body, pr_files, components_data)
                 model = args.model or None
 
                 try:
@@ -463,25 +316,22 @@ def main():
 
                     llm_result = parse_llm_response(raw)
                     existing_ids = get_existing_ids(components_data)
-                    proposals = merge_llm_results(static_candidates, llm_result, existing_ids)
-                    detection_method = "static+llm"
+                    proposals = validate_llm_results(llm_result, existing_ids)
 
-                    result = {
+                    print(json.dumps({
                         "proposals": proposals,
-                        "detection_method": detection_method,
+                        "detection_method": "llm",
                         "provider": provider,
-                    }
-                    print(json.dumps(result, ensure_ascii=False))
+                    }, ensure_ascii=False))
                     return
 
                 except Exception as e:
-                    print(f"LLM call failed, falling back to static-only: {e}", file=sys.stderr)
+                    print(f"LLM call failed: {e}", file=sys.stderr)
 
-    result = {
-        "proposals": static_candidates,
-        "detection_method": detection_method,
-    }
-    print(json.dumps(result, ensure_ascii=False))
+    print(json.dumps({
+        "proposals": [],
+        "detection_method": "none",
+    }))
 
 
 if __name__ == "__main__":

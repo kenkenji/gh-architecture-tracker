@@ -215,10 +215,12 @@ runs:
         if [ -n "$PROPOSALS" ] && [ "$PROPOSALS" != "[]" ]; then
           extra_args+=(--proposals "$PROPOSALS")
           extra_args+=(--detection-method "$DETECTION_METHOD")
-          if [ -n "$SPA_URL" ]; then
-            extra_args+=(--spa-url "$SPA_URL")
-          fi
           echo "📋 Including structural change proposals in comment"
+        fi
+
+        # SPA URLは常に渡す（提案の有無に関わらずエディタリンクを表示するため）
+        if [ -n "$SPA_URL" ]; then
+          extra_args+=(--spa-url "$SPA_URL")
         fi
 
         comment_file=$(mktemp --suffix=.md)
