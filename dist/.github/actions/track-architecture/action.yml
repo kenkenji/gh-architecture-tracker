@@ -215,7 +215,6 @@ runs:
         if [ -n "$PROPOSALS" ] && [ "$PROPOSALS" != "[]" ]; then
           extra_args+=(--proposals "$PROPOSALS")
           extra_args+=(--detection-method "$DETECTION_METHOD")
-          extra_args+=(--repo "$REPO")
           if [ -n "$SPA_URL" ]; then
             extra_args+=(--spa-url "$SPA_URL")
           fi

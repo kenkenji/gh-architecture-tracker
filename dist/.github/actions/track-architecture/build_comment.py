@@ -46,11 +46,6 @@ def parse_args():
         help="Detection method used (static / static+llm)",
     )
     parser.add_argument(
-        "--repo",
-        default="",
-        help="Repository full name (owner/repo)",
-    )
-    parser.add_argument(
         "--spa-url",
         default="",
         help="SPA base URL for editor link",
@@ -153,7 +148,7 @@ def _status_label(status):
     return labels.get(status, "")
 
 
-def build_proposals_section(proposals, detection_method, repo="", pr_number="",
+def build_proposals_section(proposals, detection_method, pr_number="",
                             spa_url=""):
     if not proposals:
         return ""
@@ -186,9 +181,8 @@ def build_proposals_section(proposals, detection_method, repo="", pr_number="",
             lines.append(f"| {action} | {target} | {summary} |")
     lines.append("")
 
-    if spa_url and repo:
-        owner, repo_name = repo.split("/", 1) if "/" in repo else ("", repo)
-        editor_url = f"{spa_url}/editor?owner={owner}&repo={repo_name}&pr={pr_number}"
+    if spa_url:
+        editor_url = f"{spa_url}/editor?pr={pr_number}"
         lines.append(f"> 👉 [SPAで詳細を確認・編集する]({editor_url})")
     else:
         lines.append("> 構造変更はSPAのエディタから確認・適用してください。")
@@ -199,7 +193,7 @@ def build_proposals_section(proposals, detection_method, repo="", pr_number="",
 
 def build_comment(pr_number, pr_title, data, source="manual", ai_component_ids=None,
                   no_impact_default=False, proposals=None, detection_method="",
-                  repo="", spa_url="", checked_ids=None):
+                  spa_url="", checked_ids=None):
     checkbox_section = build_checkbox_section(data, ai_component_ids,
                                               checked_ids=checked_ids)
 
@@ -219,7 +213,7 @@ def build_comment(pr_number, pr_title, data, source="manual", ai_component_ids=N
     no_impact_line = build_no_impact_line(checked=no_impact_default)
 
     proposals_section = build_proposals_section(
-        proposals, detection_method, repo=repo, pr_number=pr_number, spa_url=spa_url)
+        proposals, detection_method, pr_number=pr_number, spa_url=spa_url)
     if proposals_section:
         proposals_block = f"\n{proposals_section}\n---\n"
     else:
@@ -271,7 +265,7 @@ def main():
     print(build_comment(args.pr_number, args.pr_title, data, source=source,
                         ai_component_ids=ai_ids, no_impact_default=no_impact,
                         proposals=proposals, detection_method=args.detection_method,
-                        repo=args.repo, spa_url=args.spa_url,
+                        spa_url=args.spa_url,
                         checked_ids=checked_ids))
 
 

@@ -25,16 +25,20 @@ runs:
         npm ci
         npm run build
 
-    - name: Inject base path into built SPA
+    - name: Inject base path and repo info into built SPA
       shell: bash
       env:
+        REPO: ${{ github.repository }}
         REPO_NAME: ${{ inputs.repository-name }}
       run: |
         set -euo pipefail
         dist_dir="${GITHUB_WORKSPACE}/spa/dist"
+        owner="${REPO%%/*}"
         for f in "${dist_dir}/index.html" "${dist_dir}/404.html"; do
           if [ -f "$f" ]; then
             sed -i "s|__AT_BASE_PATH__ = '/'|__AT_BASE_PATH__ = '/${REPO_NAME}/'|" "$f"
+            sed -i "s|__AT_REPO_OWNER__ = ''|__AT_REPO_OWNER__ = '${owner}'|" "$f"
+            sed -i "s|__AT_REPO_NAME__ = ''|__AT_REPO_NAME__ = '${REPO_NAME}'|" "$f"
           fi
         done
 
