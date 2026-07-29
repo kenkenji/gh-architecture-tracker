@@ -77,9 +77,6 @@ runs:
         find "$work_dir" -mindepth 1 -maxdepth 1 -not -name '.git' -exec rm -rf {} +
         cp -r "$dist_dir"/. "$work_dir/"
 
-        # SPA用の404.htmlを作成（GitHub PagesでのSPAルーティング対応）
-        cp "$work_dir/index.html" "$work_dir/404.html"
-
         # Jekyll処理を無効化（アンダースコア接頭辞ファイルの無視を防止）
         touch "$work_dir/.nojekyll"
 

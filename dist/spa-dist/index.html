@@ -26,5 +26,15 @@
   <body>
     <div id="root"></div>
     <script>window.__AT_BASE_PATH__ = '/'; window.__AT_REPO_OWNER__ = ''; window.__AT_REPO_NAME__ = '';</script>
+    <script>
+      // 404.htmlからのリダイレクトを復元
+      (function () {
+        var route = new URLSearchParams(location.search).get('__route');
+        if (route) {
+          var basePath = (window.__AT_BASE_PATH__ || '/').replace(/\/$/, '');
+          history.replaceState(null, '', basePath + route);
+        }
+      })();
+    </script>
   </body>
 </html>
