@@ -213,7 +213,7 @@ cmd_init() {
   ok ".github/workflows/ (2ファイル)"
 
   # .github/actions/
-  local actions=("track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa")
+  local actions=("track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa" "detect-model-changes" "bump-model-version")
   local action_count=0
   for action in "${actions[@]}"; do
     if [ -d "${DIST_DIR}/.github/actions/${action}" ]; then
@@ -359,7 +359,7 @@ cmd_update() {
   ok ".github/workflows/"
 
   # Composite Actions
-  local actions=("track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa")
+  local actions=("track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa" "detect-model-changes" "bump-model-version")
   for action in "${actions[@]}"; do
     if [ -d "${DIST_DIR}/.github/actions/${action}" ]; then
       mkdir -p "${root}/.github/actions/${action}"
