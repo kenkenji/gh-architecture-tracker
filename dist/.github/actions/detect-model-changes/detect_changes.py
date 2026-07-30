@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import time
+import traceback
 
 import yaml
 
@@ -43,7 +44,7 @@ def is_doc_or_test_only(files):
 
 
 def get_existing_ids(components_data):
-    return {c["id"] for c in components_data.get("components", [])}
+    return {c.get("id") for c in components_data.get("components", []) if c.get("id")}
 
 
 def detect_provider():
@@ -239,20 +240,28 @@ def format_components_for_prompt(components_data):
     lines = []
     lines.append("### コンポーネント一覧")
     for c in components:
+        comp_id = c.get("id", "")
+        level = c.get("level", "")
+        if not comp_id or not level:
+            continue
         parent = c.get("parent", "")
         tech = c.get("technology", "")
         tags = c.get("tags", [])
         tags_str = f" [tags: {', '.join(tags)}]" if tags else ""
         lines.append(
-            f"- `{c['id']}` ({c['level']}, parent: {parent}): "
+            f"- `{comp_id}` ({level}, parent: {parent}): "
             f"{c.get('name', '')} — {c.get('description', '')} [{tech}]{tags_str}")
 
     if relations:
         lines.append("")
         lines.append("### 既存のRelation（関係）")
         for r in relations:
+            r_from = r.get("from", "")
+            r_to = r.get("to", "")
+            if not r_from or not r_to:
+                continue
             lines.append(
-                f"- `{r['from']}` → `{r['to']}`: {r.get('description', '')} [{r.get('technology', '')}]")
+                f"- `{r_from}` → `{r_to}`: {r.get('description', '')} [{r.get('technology', '')}]")
 
     return "\n".join(lines)
 
@@ -326,7 +335,7 @@ def main():
                     return
 
                 except Exception as e:
-                    print(f"LLM call failed: {e}", file=sys.stderr)
+                    print(f"LLM call failed: {e}\n{traceback.format_exc()}", file=sys.stderr)
 
     print(json.dumps({
         "proposals": [],

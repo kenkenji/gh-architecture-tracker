@@ -58,12 +58,14 @@ jobs:
           relations: []
           YAML
 
-          # config.yaml を作成（spa.url を自動設定）
+          # config.yaml を作成（spa.url, llm.model を自動設定）
           owner="${REPO%%/*}"
           repo="${REPO##*/}"
           cat > config.yaml << YAML
           spa:
             url: https://${owner}.github.io/${repo}
+          llm:
+            model: claude-sonnet-5
           YAML
 
           echo '{"version":"1.0","mappings":{}}' > mappings.json
