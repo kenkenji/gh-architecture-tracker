@@ -30,6 +30,21 @@ require_git_repo() {
   fi
 }
 
+require_default_branch() {
+  local current_branch
+  current_branch=$(git branch --show-current)
+  if [ -z "$current_branch" ]; then
+    error "detached HEAD 状態です。デフォルトブランチをチェックアウトしてください。"
+    exit 1
+  fi
+  local default_branch
+  default_branch=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || echo "main")
+  if [ "$current_branch" != "$default_branch" ]; then
+    error "デフォルトブランチ（${default_branch}）で実行してください。現在のブランチ: ${current_branch}"
+    exit 1
+  fi
+}
+
 require_dist() {
   if [ ! -d "$DIST_DIR" ]; then
     error "配布ファイルが見つかりません: ${DIST_DIR}"
@@ -172,6 +187,7 @@ cmd_init() {
   done
 
   require_git_repo
+  require_default_branch
   require_dist
   require_app_installed
 
@@ -321,6 +337,7 @@ cmd_update() {
   done
 
   require_git_repo
+  require_default_branch
   require_dist
   require_app_installed
 
