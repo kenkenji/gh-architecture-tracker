@@ -51,9 +51,19 @@ jobs:
           cat > components.yaml << 'YAML'
           # Architecture Tracker — コンポーネント定義
           # SPA上のエディタで編集できます
-          model: c4
-          systems: []
+          version: "1"
+          model:
+            type: "c4"
+          components: []
           relations: []
+          YAML
+
+          # config.yaml を作成（spa.url を自動設定）
+          owner="${REPO%%/*}"
+          repo="${REPO##*/}"
+          cat > config.yaml << YAML
+          spa:
+            url: https://${owner}.github.io/${repo}
           YAML
 
           echo '{"version":"1.0","mappings":{}}' > mappings.json
