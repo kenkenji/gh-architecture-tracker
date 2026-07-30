@@ -185,7 +185,7 @@ def build_editor_link_section(spa_url, pr_number=""):
         return ""
     editor_url = f"{spa_url}/editor?pr={pr_number}"
     lines = []
-    lines.append(f"> 📝 [アーキテクチャモデルを編集する]({editor_url})")
+    lines.append(f'> 📝 <a href="{editor_url}" target="_blank">アーキテクチャモデルを編集する</a>')
     lines.append("")
     return "\n".join(lines)
 
