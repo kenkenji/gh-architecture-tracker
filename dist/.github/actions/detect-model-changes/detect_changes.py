@@ -203,7 +203,7 @@ def validate_llm_results(llm_result, existing_ids):
         if not from_id or not to_id:
             continue
 
-        all_ids = existing_ids | {p["id"] for p in proposals if p.get("action") == "add"}
+        all_ids = existing_ids | {p["id"] for p in proposals if p.get("action") == "add" and "id" in p}
         if from_id not in all_ids or to_id not in all_ids:
             print(f"Warning: relation {from_id} -> {to_id} references unknown component, skipping",
                   file=sys.stderr)
