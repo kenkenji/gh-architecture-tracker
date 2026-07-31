@@ -28,7 +28,7 @@ jobs:
       || github.event_name == 'repository_dispatch'
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       pull-requests: read
     outputs:
       proposals: ${{ steps.detect-action.outputs.proposals || steps.passthrough.outputs.proposals }}
@@ -145,6 +145,72 @@ jobs:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           model: ${{ steps.config.outputs.model }}
+
+      - name: Save proposals to data branch
+        if: >-
+          github.event_name != 'repository_dispatch'
+          && steps.detect-action.outputs.proposals != ''
+          && steps.detect-action.outputs.proposals != '[]'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr-number }}
+          PROPOSALS: ${{ steps.detect-action.outputs.proposals }}
+          DETECTION_METHOD: ${{ steps.detect-action.outputs.detection-method }}
+        run: |
+          set -euo pipefail
+
+          proposals_json_file=$(mktemp --suffix=.json)
+          export OUT_FILE="$proposals_json_file"
+          python3 -c "
+          import json, os
+          from datetime import datetime, timezone
+          data = {
+              'schema_version': 1,
+              'pr_number': int(os.environ['PR_NUMBER']),
+              'detection_method': os.environ['DETECTION_METHOD'],
+              'detected_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+              'proposals': json.loads(os.environ['PROPOSALS'])
+          }
+          with open(os.environ['OUT_FILE'], 'w') as f:
+              json.dump(data, f, ensure_ascii=False, indent=2)
+          " || { echo "::error::Failed to build proposals JSON"; exit 1; }
+
+          encoded=$(base64 -w 0 < "$proposals_json_file")
+          rm -f "$proposals_json_file"
+
+          file_path="proposals/pr-${PR_NUMBER}.json"
+
+          existing_sha=""
+          if sha_result=$(gh api "repos/${REPO}/contents/${file_path}?ref=_architecture-tracker" \
+            --jq '.sha' 2>&1); then
+            existing_sha="$sha_result"
+          elif echo "$sha_result" | grep -q "404"; then
+            existing_sha=""
+          else
+            echo "::warning::Unexpected error checking ${file_path}: ${sha_result}"
+            existing_sha=""
+          fi
+
+          if [ -n "$existing_sha" ]; then
+            gh api "repos/${REPO}/contents/${file_path}" \
+              --method PUT \
+              -f message="Save proposals for PR #${PR_NUMBER}" \
+              -f content="${encoded}" \
+              -f branch="_architecture-tracker" \
+              -f sha="${existing_sha}" \
+              --silent
+          else
+            gh api "repos/${REPO}/contents/${file_path}" \
+              --method PUT \
+              -f message="Save proposals for PR #${PR_NUMBER}" \
+              -f content="${encoded}" \
+              -f branch="_architecture-tracker" \
+              --silent
+          fi
+
+          echo "✅ Saved ${file_path} to _architecture-tracker branch"
 
   post-comment:
     if: >-
