@@ -125,9 +125,28 @@ runs:
         rm -f "$EXISTING_BODY_FILE"
         echo "📋 Extracted existing state: source=${source}, checked=$(echo "$checked" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" ) components, no_impact=${no_impact}"
 
+    - name: Fetch PR body for regenerate mode
+      id: fetch-pr-body
+      if: steps.check.outputs.already_posted != 'true' && inputs.mode == 'regenerate'
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
+      run: |
+        set -euo pipefail
+        pr_body=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.body // ""')
+        delimiter="GHEOF_$(openssl rand -hex 8)"
+        {
+          echo "pr_body<<${delimiter}"
+          echo "${pr_body}"
+          echo "${delimiter}"
+        } >> "$GITHUB_OUTPUT"
+
     - name: Extract components via LLM
       id: extract
-      if: steps.check.outputs.already_posted != 'true' && inputs.mode != 'regenerate'
+      if: steps.check.outputs.already_posted != 'true' && steps.fetch-pr-body.outcome != 'failure'
       continue-on-error: true
       uses: ./.github/actions/extract-components
       with:
@@ -137,6 +156,7 @@ runs:
         openai-api-key: ${{ inputs.openai-api-key }}
         claude-code-oauth-token: ${{ inputs.claude-code-oauth-token }}
         model: ${{ inputs.model }}
+        pr-body: ${{ steps.fetch-pr-body.outputs.pr_body }}
 
     - name: Fetch components and build comment
       if: steps.check.outputs.already_posted != 'true'
@@ -180,17 +200,31 @@ runs:
         ai_notice=""
 
         if [ "$MODE" = "regenerate" ]; then
-          # 再生成: 既存コメントの状態を復元
-          if [ -n "$EXISTING_AI_COMPONENTS" ] && [ "$EXISTING_AI_COMPONENTS" != "[]" ]; then
-            extra_args=(--ai-components "$EXISTING_AI_COMPONENTS")
+          # 再生成: LLM再抽出が成功した場合は新しい結果を使用、失敗/スキップ時は既存状態を復元
+          if [ "$AI_OUTCOME" = "success" ] && [ "$AI_SKIPPED" != "true" ]; then
+            if [ -n "$AI_COMPONENTS" ] && [ "$AI_COMPONENTS" != "[]" ]; then
+              extra_args=(--ai-components "$AI_COMPONENTS")
+              echo "🔄 Regenerating with re-extracted AI components (provider: ${AI_PROVIDER})"
+            else
+              extra_args=(--no-impact-default)
+              echo "🔄 Re-extraction found no matching components (provider: ${AI_PROVIDER})"
+            fi
+          else
+            if [ -n "$EXISTING_AI_COMPONENTS" ] && [ "$EXISTING_AI_COMPONENTS" != "[]" ]; then
+              extra_args=(--ai-components "$EXISTING_AI_COMPONENTS")
+            fi
+            if [ -n "$EXISTING_CHECKED" ] && [ "$EXISTING_CHECKED" != "[]" ]; then
+              extra_args+=(--checked-components "$EXISTING_CHECKED")
+            fi
+            if [ "$EXISTING_NO_IMPACT" = "true" ]; then
+              extra_args+=(--no-impact-checked)
+            fi
+            if [ "$AI_SKIPPED" = "true" ]; then
+              echo "🔄 LLM API key not configured, regenerating with existing state"
+            else
+              echo "🔄 LLM re-extraction failed, regenerating with existing state (source: ${EXISTING_SOURCE})"
+            fi
           fi
-          if [ -n "$EXISTING_CHECKED" ] && [ "$EXISTING_CHECKED" != "[]" ]; then
-            extra_args+=(--checked-components "$EXISTING_CHECKED")
-          fi
-          if [ "$EXISTING_NO_IMPACT" = "true" ]; then
-            extra_args+=(--no-impact-checked)
-          fi
-          echo "🔄 Regenerating comment with existing state (source: ${EXISTING_SOURCE})"
         else
           # 新規: LLM抽出結果を使用
           if [ "$AI_OUTCOME" = "success" ] && [ "$AI_SKIPPED" != "true" ] && [ -n "$AI_COMPONENTS" ] && [ "$AI_COMPONENTS" != "[]" ]; then
