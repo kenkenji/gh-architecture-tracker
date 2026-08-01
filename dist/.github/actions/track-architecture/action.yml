@@ -116,8 +116,22 @@ runs:
         PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
         REPO: ${{ github.repository }}
         COMMENT_ID: ${{ steps.check.outputs.comment_id }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        OPENAI_API_KEY: ${{ inputs.openai-api-key }}
+        CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude-code-oauth-token }}
       run: |
         set -euo pipefail
+
+        HAS_LLM_KEY=false
+        if [ -n "$ANTHROPIC_API_KEY" ] || [ -n "$OPENAI_API_KEY" ] || [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+          HAS_LLM_KEY=true
+        fi
+
+        if [ "$HAS_LLM_KEY" = "false" ]; then
+          echo "📝 No LLM key configured, skipping processing status"
+          echo "comment_id=${COMMENT_ID}" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
 
         PROCESSING_BODY=$(cat <<'BODY_EOF'
         ## 🏗 Architecture Tracker
@@ -317,22 +331,28 @@ runs:
         rm -f "$components_file"
         echo "comment_file=${comment_file}" >> "$GITHUB_OUTPUT"
 
-    - name: Update comment with result
+    - name: Post or update comment with result
       if: steps.check.outputs.already_posted != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
         REPO: ${{ github.repository }}
         COMMENT_ID: ${{ steps.processing.outputs.comment_id }}
         COMMENT_FILE: ${{ steps.build.outputs.comment_file }}
       run: |
         set -euo pipefail
-        echo "Updating comment ${COMMENT_ID} with result"
-        gh api "repos/${REPO}/issues/comments/${COMMENT_ID}" \
-          --method PATCH \
-          --field body=@"$COMMENT_FILE"
+        if [ -n "$COMMENT_ID" ]; then
+          echo "Updating comment ${COMMENT_ID} with result"
+          gh api "repos/${REPO}/issues/comments/${COMMENT_ID}" \
+            --method PATCH \
+            --field body=@"$COMMENT_FILE"
+        else
+          echo "Posting new comment to PR #${PR_NUMBER}"
+          gh pr comment "$PR_NUMBER" --body-file "$COMMENT_FILE" --repo "$REPO"
+        fi
         rm -f "$COMMENT_FILE"
-        echo "✅ Architecture tracking comment updated successfully"
+        echo "✅ Architecture tracking comment posted successfully"
 
     - name: Create tracking issue
       if: steps.check.outputs.already_posted != 'true' && inputs.mode != 'regenerate'
