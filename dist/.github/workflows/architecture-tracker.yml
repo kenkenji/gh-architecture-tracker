@@ -77,32 +77,48 @@ jobs:
         run: |
           set -euo pipefail
 
-          # resolved_at 確認付きリトライ（設計ドキュメント準拠: 最大3回、5秒間隔）
-          for attempt in 1 2 3; do
-            proposals_json=$(gh api "repos/${REPO}/contents/proposals/pr-${PR_NUMBER}.json?ref=_architecture-tracker" \
-              --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+          proposals_json=$(gh api "repos/${REPO}/contents/proposals/pr-${PR_NUMBER}.json?ref=_architecture-tracker" \
+            --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+
+          if [ -z "$proposals_json" ]; then
+            echo "📋 proposals/pr-${PR_NUMBER}.json not found — proceeding without proposals"
+            proposals="[]"
+            proposal_count=0
+            detection_method="none"
+          else
+            # resolved_at 確認付きリトライ（設計ドキュメント準拠: 最大3回、5秒間隔）
+            resolved_at=$(echo "$proposals_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('resolved_at', ''))")
+            if [ -z "$resolved_at" ]; then
+              for retry in 1 2; do
+                echo "⏳ resolved_at not yet set (retry ${retry}/2), retrying in 5s..."
+                sleep 5
+                proposals_json=$(gh api "repos/${REPO}/contents/proposals/pr-${PR_NUMBER}.json?ref=_architecture-tracker" \
+                  --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || echo "")
+                if [ -z "$proposals_json" ]; then
+                  echo "⚠️ proposals file became unavailable during retry, skipping"
+                  continue
+                fi
+                resolved_at=$(echo "$proposals_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('resolved_at', ''))")
+                if [ -n "$resolved_at" ]; then
+                  break
+                fi
+              done
+              if [ -z "$resolved_at" ]; then
+                echo "::warning::proposals/pr-${PR_NUMBER}.json has no resolved_at after retries, proceeding anyway"
+              fi
+            fi
 
             if [ -z "$proposals_json" ]; then
-              echo "::error::proposals/pr-${PR_NUMBER}.json not found on _architecture-tracker branch"
-              exit 1
-            fi
-
-            resolved_at=$(echo "$proposals_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('resolved_at', ''))")
-            if [ -n "$resolved_at" ]; then
-              break
-            fi
-
-            if [ "$attempt" -lt 3 ]; then
-              echo "⏳ resolved_at not yet set (attempt ${attempt}/3), retrying in 5s..."
-              sleep 5
+              echo "⚠️ proposals file became unavailable — falling back to empty proposals"
+              proposals="[]"
+              proposal_count=0
+              detection_method="none"
             else
-              echo "::warning::proposals/pr-${PR_NUMBER}.json has no resolved_at after 3 attempts, proceeding anyway"
+              proposals=$(echo "$proposals_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d.get('proposals', [])))")
+              proposal_count=$(echo "$proposals" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
+              detection_method=$(echo "$proposals_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('detection_method', 'none'))")
             fi
-          done
-
-          proposals=$(echo "$proposals_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d.get('proposals', [])))")
-          proposal_count=$(echo "$proposals" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
-          detection_method=$(echo "$proposals_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('detection_method', 'none'))")
+          fi
 
           delimiter="GHEOF_$(openssl rand -hex 8)"
           {
