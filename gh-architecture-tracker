@@ -320,6 +320,7 @@ cmd_init() {
   require_git_repo
   require_default_branch
   require_dist
+  require_app_installed
 
   local root
   root=$(get_repo_root)
@@ -444,11 +445,9 @@ Installed via gh-architecture-tracker CLI extension.
   ok "セットアップ完了！"
   echo ""
   echo "次のステップ:"
-  echo "  1. GitHub App をインストール（SPA上のOAuth認証に必要）:"
-  echo "     ${APP_INSTALL_URL}"
-  echo "  2. LLM APIキーを設定（オプション）:"
+  echo "  1. LLM APIキーを設定（オプション）:"
   echo "     リポジトリ Settings → Secrets → ANTHROPIC_API_KEY or OPENAI_API_KEY"
-  echo "  3. SPA にアクセス:"
+  echo "  2. SPA にアクセス:"
   local pages_owner
   pages_owner=$(gh api user --jq '.login' 2>/dev/null || echo "{owner}")
   echo "     https://${pages_owner}.github.io/${repo_name}/"
@@ -469,6 +468,7 @@ cmd_update() {
   require_git_repo
   require_default_branch
   require_dist
+  require_app_installed
 
   local root
   root=$(get_repo_root)
