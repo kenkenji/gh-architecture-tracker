@@ -58,30 +58,8 @@ get_repo_root() {
 }
 
 require_app_installed() {
-  # API でインストール状態を確認（ユーザー OAuth トークン経由）
-  local install_id
-  local api_ok=false
-  install_id=$(gh api "/user/installations" --paginate \
-    --jq "limit(1; .installations[] | select(.app_slug == \"${APP_SLUG}\") | .id)" 2>/dev/null) && api_ok=true
-
-  if [ "$api_ok" = true ]; then
-    if [ -n "$install_id" ]; then
-      ok "GitHub App「Architecture Tracker」はインストール済みです"
-      return 0
-    fi
-
-    # API は成功したが未インストール
-    echo ""
-    info "GitHub App「Architecture Tracker」のインストールが必要です。"
-    echo "  インストールページ: ${APP_INSTALL_URL}"
-    echo ""
-    info "インストール後、再度実行してください。"
-    exit 1
-  fi
-
-  # API エラー（権限不足等）— フォールバックでユーザーに確認
-  warn "API でのインストール確認に失敗しました。手動で確認します。"
   echo ""
+  info "GitHub App「Architecture Tracker」のインストールが必要です。"
   echo "  インストールページ: ${APP_INSTALL_URL}"
   echo ""
   if ! confirm "GitHub App をインストール済みですか？"; then
