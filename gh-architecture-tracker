@@ -62,7 +62,7 @@ require_app_installed() {
   local install_id
   local api_ok=false
   install_id=$(gh api "/user/installations" --paginate \
-    --jq ".installations[] | select(.app_slug == \"${APP_SLUG}\") | .id" 2>/dev/null) && api_ok=true
+    --jq "limit(1; .installations[] | select(.app_slug == \"${APP_SLUG}\") | .id)" 2>/dev/null) && api_ok=true
 
   if [ "$api_ok" = true ]; then
     if [ -n "$install_id" ]; then
@@ -80,8 +80,8 @@ require_app_installed() {
   fi
 
   # API エラー（権限不足等）— フォールバックでユーザーに確認
+  warn "API でのインストール確認に失敗しました。手動で確認します。"
   echo ""
-  info "GitHub App「Architecture Tracker」のインストールが必要です。"
   echo "  インストールページ: ${APP_INSTALL_URL}"
   echo ""
   if ! confirm "GitHub App をインストール済みですか？"; then
