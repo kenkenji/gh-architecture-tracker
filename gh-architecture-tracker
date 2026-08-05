@@ -58,6 +58,17 @@ get_repo_root() {
 }
 
 require_app_installed() {
+  # API でインストール状態を確認（ユーザー OAuth トークン経由）
+  local install_id
+  install_id=$(gh api "/user/installations" --paginate \
+    --jq ".installations[] | select(.app_slug == \"${APP_SLUG}\") | .id" 2>/dev/null || echo "")
+
+  if [ -n "$install_id" ]; then
+    ok "GitHub App「Architecture Tracker」はインストール済みです"
+    return 0
+  fi
+
+  # API エラー（権限不足等）の場合はユーザーに案内
   echo ""
   info "GitHub App「Architecture Tracker」のインストールが必要です。"
   echo "  インストールページ: ${APP_INSTALL_URL}"
@@ -102,13 +113,135 @@ sed_inplace() {
   fi
 }
 
+create_data_branch() {
+  local remote_url
+  remote_url=$(git remote get-url origin)
+
+  if git ls-remote --heads "$remote_url" _architecture-tracker 2>/dev/null | grep -q '_architecture-tracker'; then
+    ok "_architecture-tracker ブランチは既に存在します"
+    return 0
+  fi
+
+  info "_architecture-tracker データブランチを作成しています..."
+
+  local work_dir
+  work_dir=$(mktemp -d)
+  trap 'rm -rf "$work_dir"' RETURN
+
+  git init "$work_dir" >/dev/null 2>&1
+  git -C "$work_dir" checkout --orphan _architecture-tracker >/dev/null 2>&1
+  git -C "$work_dir" remote add origin "$remote_url" 2>/dev/null
+  git -C "$work_dir" config user.name "$(git config user.name || echo 'gh-extension')"
+  git -C "$work_dir" config user.email "$(git config user.email || echo 'gh-extension@users.noreply.github.com')"
+
+  # 初期データファイルを作成
+  cat > "${work_dir}/components.yaml" << 'YAML'
+# Architecture Tracker — コンポーネント定義
+# SPA上のエディタで編集できます
+version: "1"
+model:
+  type: "c4"
+components: []
+relations: []
+YAML
+
+  local owner repo_name
+  owner=$(gh repo view --json owner --jq '.owner.login' 2>/dev/null || echo "")
+  repo_name=$(gh repo view --json name --jq '.name' 2>/dev/null || echo "")
+  cat > "${work_dir}/config.yaml" << YAML
+spa:
+  url: https://${owner}.github.io/${repo_name}
+llm:
+  model: claude-sonnet-5
+YAML
+
+  echo '{"version":"1.0","mappings":{}}' > "${work_dir}/mappings.json"
+  echo '{"version":"1.0","entries":[]}' > "${work_dir}/timeline.json"
+  echo '{"version":"1.0","entries":[]}' > "${work_dir}/model-changelog.json"
+
+  git -C "$work_dir" add -A
+  git -C "$work_dir" commit -m "Initialize architecture tracker data" >/dev/null
+
+  if git -C "$work_dir" push origin _architecture-tracker; then
+    ok "_architecture-tracker ブランチを作成しました"
+  else
+    warn "_architecture-tracker ブランチの作成に失敗しました"
+    return 1
+  fi
+}
+
+configure_branch_protection() {
+  local repo="$1"
+
+  info "ブランチ保護を設定しています..."
+
+  if gh api "repos/${repo}/branches/_architecture-tracker/protection" \
+    -X PUT \
+    --input - << 'JSON' 2>/dev/null; then
+{
+  "required_status_checks": null,
+  "enforce_admins": false,
+  "required_pull_request_reviews": null,
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+JSON
+    ok "ブランチ保護を設定しました"
+  else
+    warn "ブランチ保護の設定に失敗しました（権限不足の可能性があります）"
+  fi
+}
+
+enable_github_pages() {
+  local repo="$1"
+
+  # GitHub Pagesの現在の設定を確認
+  local pages_status
+  pages_status=$(gh api "repos/${repo}/pages" --jq '.status' 2>/dev/null || echo "not_found")
+
+  if [ "$pages_status" != "not_found" ]; then
+    ok "GitHub Pages は既に設定済みです (status: ${pages_status})"
+    # ソースブランチがgh-pagesでない場合は更新
+    local current_branch
+    current_branch=$(gh api "repos/${repo}/pages" --jq '.source.branch' 2>/dev/null || echo "")
+    if [ "$current_branch" != "gh-pages" ]; then
+      info "Pages ソースを gh-pages ブランチに更新しています..."
+      gh api "repos/${repo}/pages" \
+        -X PUT \
+        -f "source[branch]=gh-pages" \
+        -f "source[path]=/" \
+        --silent 2>/dev/null || true
+    fi
+    return 0
+  fi
+
+  # GitHub Pagesを有効化
+  info "GitHub Pages を有効化しています..."
+  if gh api "repos/${repo}/pages" \
+    -X POST \
+    -f "source[branch]=gh-pages" \
+    -f "source[path]=/" \
+    --silent 2>/dev/null; then
+    ok "GitHub Pages を有効化しました"
+  else
+    warn "GitHub Pagesの自動有効化に失敗しました"
+    echo ""
+    echo "以下の手順で手動設定してください："
+    echo "  1. リポジトリの Settings → Pages を開く"
+    echo "  2. Source を 'Deploy from a branch' に設定"
+    echo "  3. Branch を 'gh-pages' / '/ (root)' に設定"
+    echo "  4. Save をクリック"
+  fi
+}
+
 deploy_spa_to_ghpages() {
   local root="$1"
   local repo_name="$2"
   local spa_dist="${DIST_DIR}/spa-dist"
 
   if [ ! -d "$spa_dist" ]; then
-    warn "プリビルド済みSPAが見つかりません。初期化ワークフローでビルドしてください。"
+    warn "プリビルド済みSPAが見つかりません。gh extension を再インストールしてください。"
     return 1
   fi
 
@@ -175,12 +308,10 @@ deploy_spa_to_ghpages() {
 
 cmd_init() {
   local no_push=false
-  local no_workflow=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --no-push) no_push=true; shift ;;
-      --no-workflow) no_workflow=true; shift ;;
       --help|-h) usage_init; exit 0 ;;
       *) error "不明なオプション: $1"; usage_init; exit 1 ;;
     esac
@@ -200,19 +331,9 @@ cmd_init() {
   echo ""
 
   # 競合チェック
-  local conflicts=()
   if [ -f "${root}/.github/workflows/architecture-tracker.yml" ]; then
-    conflicts+=(".github/workflows/architecture-tracker.yml")
-  fi
-  if [ -f "${root}/.github/workflows/architecture-tracker-init.yml" ]; then
-    conflicts+=(".github/workflows/architecture-tracker-init.yml")
-  fi
-
-  if [ ${#conflicts[@]} -gt 0 ]; then
     warn "以下のファイルが既に存在します:"
-    for f in "${conflicts[@]}"; do
-      echo "  - ${f}"
-    done
+    echo "  - .github/workflows/architecture-tracker.yml"
     if ! confirm "上書きしますか？"; then
       info "中止しました。'gh architecture-tracker update' で更新できます。"
       exit 0
@@ -222,11 +343,16 @@ cmd_init() {
   # ファイルコピー
   info "ファイルをコピーしています..."
 
-  # .github/workflows/
+  # .github/workflows/ (architecture-tracker.yml のみ配布)
   mkdir -p "${root}/.github/workflows"
   cp "${DIST_DIR}/.github/workflows/architecture-tracker.yml" "${root}/.github/workflows/"
-  cp "${DIST_DIR}/.github/workflows/architecture-tracker-init.yml" "${root}/.github/workflows/"
-  ok ".github/workflows/ (2ファイル)"
+  ok ".github/workflows/architecture-tracker.yml"
+
+  # 旧バージョンの init ワークフローが残っている場合は削除
+  if [ -f "${root}/.github/workflows/architecture-tracker-init.yml" ]; then
+    rm "${root}/.github/workflows/architecture-tracker-init.yml"
+    info "不要になった architecture-tracker-init.yml を削除しました"
+  fi
 
   # .github/actions/
   local actions=("track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa" "detect-model-changes" "bump-model-version")
@@ -256,7 +382,6 @@ cmd_init() {
 
     cd "$root"
     local add_targets=(.github/workflows/architecture-tracker.yml
-                       .github/workflows/architecture-tracker-init.yml
                        "${VERSION_MARKER}")
     for action in "${actions[@]}"; do
       if [ -d ".github/actions/${action}" ]; then
@@ -265,13 +390,18 @@ cmd_init() {
     done
     git add "${add_targets[@]}"
 
+    # 旧 init ワークフローの削除もステージング
+    if git ls-files --error-unmatch .github/workflows/architecture-tracker-init.yml >/dev/null 2>&1; then
+      git rm .github/workflows/architecture-tracker-init.yml >/dev/null 2>&1 || true
+    fi
+
     if git diff --cached --quiet; then
       info "変更はありません（既に最新です）。"
     else
       git commit -m "Add Architecture Tracker (v${VERSION})
 
 Installed via gh-architecture-tracker CLI extension.
-- Workflow files for PR tracking and initialization
+- Workflow file for PR tracking
 - Composite Actions for component extraction and mapping"
 
       local branch
@@ -284,30 +414,29 @@ Installed via gh-architecture-tracker CLI extension.
     fi
   fi
 
-  # SPA デプロイ & データブランチ作成
-  if [ "$no_push" = false ] && [ "$no_workflow" = false ]; then
+  # データブランチ作成・SPA デプロイ・GitHub Pages 有効化
+  if [ "$no_push" = false ]; then
     echo ""
+
+    local repo
+    repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
+
+    # データブランチ作成
+    create_data_branch || true
 
     # プリビルド済みSPAがあれば直接デプロイ
     if [ -d "${DIST_DIR}/spa-dist" ]; then
       deploy_spa_to_ghpages "$root" "$repo_name" || true
     fi
 
-    # 初期化ワークフロー起動（データブランチ作成）
-    if confirm "初期化ワークフローを実行しますか？（データブランチ作成・GitHub Pages有効化）"; then
-      local repo
-      repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
-      if [ -n "$repo" ]; then
-        if gh workflow run architecture-tracker-init.yml --repo "$repo" 2>/dev/null; then
-          ok "初期化ワークフローを起動しました"
-          info "進捗は Actions タブで確認できます:"
-          info "  https://github.com/${repo}/actions/workflows/architecture-tracker-init.yml"
-        else
-          warn "ワークフローの起動に失敗しました。Actions タブから手動で実行してください。"
-        fi
-      else
-        warn "リポジトリ情報を取得できませんでした。Actions タブから手動で実行してください。"
-      fi
+    # GitHub Pages 有効化
+    if [ -n "$repo" ]; then
+      enable_github_pages "$repo"
+    fi
+
+    # ブランチ保護（失敗時は警告のみ）
+    if [ -n "$repo" ]; then
+      configure_branch_protection "$repo"
     fi
   fi
 
@@ -318,10 +447,10 @@ Installed via gh-architecture-tracker CLI extension.
   echo "次のステップ:"
   echo "  1. LLM APIキーを設定（オプション）:"
   echo "     リポジトリ Settings → Secrets → ANTHROPIC_API_KEY or OPENAI_API_KEY"
-  echo "  2. 初期化ワークフローが完了したら、SPA にアクセス:"
-  local owner
-  owner=$(gh api user --jq '.login' 2>/dev/null || echo "{owner}")
-  echo "     https://${owner}.github.io/${repo_name}/"
+  echo "  2. SPA にアクセス:"
+  local pages_owner
+  pages_owner=$(gh api user --jq '.login' 2>/dev/null || echo "{owner}")
+  echo "     https://${pages_owner}.github.io/${repo_name}/"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 
@@ -370,10 +499,15 @@ cmd_update() {
 
   info "ファイルを更新しています..."
 
-  # ワークフロー
+  # ワークフロー (architecture-tracker.yml のみ配布)
   cp "${DIST_DIR}/.github/workflows/architecture-tracker.yml" "${root}/.github/workflows/"
-  cp "${DIST_DIR}/.github/workflows/architecture-tracker-init.yml" "${root}/.github/workflows/"
-  ok ".github/workflows/"
+  ok ".github/workflows/architecture-tracker.yml"
+
+  # 旧バージョンの init ワークフローが残っている場合は削除
+  if [ -f "${root}/.github/workflows/architecture-tracker-init.yml" ]; then
+    rm "${root}/.github/workflows/architecture-tracker-init.yml"
+    info "不要になった architecture-tracker-init.yml を削除しました"
+  fi
 
   # Composite Actions
   local actions=("track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa" "detect-model-changes" "bump-model-version")
@@ -393,7 +527,6 @@ cmd_update() {
   else
     cd "$root"
     local add_targets=(.github/workflows/architecture-tracker.yml
-                       .github/workflows/architecture-tracker-init.yml
                        "${VERSION_MARKER}")
     for action in "${actions[@]}"; do
       if [ -d ".github/actions/${action}" ]; then
@@ -401,6 +534,11 @@ cmd_update() {
       fi
     done
     git add "${add_targets[@]}"
+
+    # 旧 init ワークフローの削除もステージング
+    if git ls-files --error-unmatch .github/workflows/architecture-tracker-init.yml >/dev/null 2>&1; then
+      git rm .github/workflows/architecture-tracker-init.yml >/dev/null 2>&1 || true
+    fi
 
     if git diff --cached --quiet; then
       info "変更はありません。"
@@ -426,16 +564,6 @@ Updated via gh-architecture-tracker CLI extension."
   if [ -d "${DIST_DIR}/spa-dist" ]; then
     if confirm "SPA を再デプロイしますか？"; then
       deploy_spa_to_ghpages "$root" "$repo_name" || true
-    fi
-  else
-    if confirm "SPA を再ビルドしますか？（初期化ワークフローを実行）"; then
-      local repo
-      repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
-      if [ -n "$repo" ]; then
-        gh workflow run architecture-tracker-init.yml --repo "$repo" 2>/dev/null && \
-          ok "初期化ワークフローを起動しました" || \
-          warn "ワークフローの起動に失敗しました。Actions タブから手動で実行してください。"
-      fi
     fi
   fi
 }
@@ -480,15 +608,16 @@ gh architecture-tracker init — リポジトリに Architecture Tracker をセ�
   gh architecture-tracker init [options]
 
 オプション:
-  --no-push       ファイル配置のみ行い、コミット・プッシュはしない
-  --no-workflow   初期化ワークフローを自動実行しない
-  -h, --help      このヘルプを表示
+  --no-push    ファイル配置のみ行い、コミット・プッシュはしない
+  -h, --help   このヘルプを表示
 
 処理内容:
   1. ワークフローファイル・Composite Actionをリポジトリに配置
   2. 変更をコミット・プッシュ
-  3. プリビルド済みSPAをgh-pagesにデプロイ
-  4. 初期化ワークフローを起動（データブランチ作成・GitHub Pages有効化）
+  3. _architecture-tracker データブランチの作成
+  4. プリビルド済みSPAをgh-pagesにデプロイ
+  5. GitHub Pagesの有効化
+  6. ブランチ保護の設定
 EOF
 }
 
