@@ -457,7 +457,6 @@ cmd_update() {
   require_git_repo
   require_default_branch
   require_dist
-  require_app_installed
 
   local root
   root=$(get_repo_root)
