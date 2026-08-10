@@ -317,6 +317,62 @@ jobs:
           pr-title: ${{ steps.pr-info.outputs.pr_title || steps.pr-info-dispatch.outputs.pr_title }}
           mode: ${{ github.event_name == 'repository_dispatch' && 'regenerate' || 'new' }}
 
+  regenerate-catchup:
+    if: >-
+      !failure() && !cancelled()
+      && needs.post-comment.result == 'success'
+      && github.event_name == 'repository_dispatch'
+    needs: post-comment
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Installation Token
+        id: app-token
+        if: ${{ vars.APP_ID != '' }}
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Fetch PR info
+        id: pr-info
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
+            --jq '"pr_title=\(.title)\npr_url=\(.html_url)\nmerged_at=\(.merged_at)\nauthor=\(.user.login)"' \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Update mapping from comment
+        id: catchup
+        uses: ./.github/actions/catch-up-mapping
+        with:
+          github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          data-branch: _architecture-tracker
+          pr-number: ${{ github.event.client_payload.pr_number }}
+          pr-title: ${{ steps.pr-info.outputs.pr_title }}
+          pr-url: ${{ steps.pr-info.outputs.pr_url }}
+          merged-at: ${{ steps.pr-info.outputs.merged_at }}
+          author: ${{ steps.pr-info.outputs.author }}
+
+      - name: Regenerate Mermaid diagram
+        if: steps.catchup.outputs.recorded == 'true'
+        uses: ./.github/actions/generate-mermaid
+        with:
+          github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          data-branch: _architecture-tracker
+          pr-number: ${{ github.event.client_payload.pr_number }}
+
   merge-catchup:
     if: >-
       !failure() && !cancelled()

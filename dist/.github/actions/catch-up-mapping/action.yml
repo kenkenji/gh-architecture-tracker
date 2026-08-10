@@ -9,6 +9,26 @@ inputs:
     description: "Branch name where architecture data is stored"
     required: true
     default: "_architecture-tracker"
+  pr-number:
+    description: "PR number (override for non-pull_request events)"
+    required: false
+    default: ""
+  pr-title:
+    description: "PR title (override for non-pull_request events)"
+    required: false
+    default: ""
+  pr-url:
+    description: "PR URL (override for non-pull_request events)"
+    required: false
+    default: ""
+  merged-at:
+    description: "PR merged_at timestamp (override for non-pull_request events)"
+    required: false
+    default: ""
+  author:
+    description: "PR author login (override for non-pull_request events)"
+    required: false
+    default: ""
 
 outputs:
   recorded:
@@ -24,7 +44,7 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github-token }}
         REPO: ${{ github.repository }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
@@ -80,15 +100,15 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
         REPO: ${{ github.repository }}
         DATA_BRANCH: ${{ inputs.data-branch }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
-        PR_TITLE: ${{ github.event.pull_request.title }}
-        PR_URL: ${{ github.event.pull_request.html_url }}
-        MERGED_AT: ${{ github.event.pull_request.merged_at }}
+        PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
+        PR_TITLE: ${{ inputs.pr-title || github.event.pull_request.title }}
+        PR_URL: ${{ inputs.pr-url || github.event.pull_request.html_url }}
+        MERGED_AT: ${{ inputs.merged-at || github.event.pull_request.merged_at }}
         COMPONENTS: ${{ steps.parse.outputs.components }}
         SOURCE: ${{ steps.parse.outputs.source }}
         AI_COMPONENTS: ${{ steps.parse.outputs.ai_components }}
         NO_IMPACT: ${{ steps.parse.outputs.no_impact }}
-        AUTHOR: ${{ github.event.pull_request.user.login }}
+        AUTHOR: ${{ inputs.author || github.event.pull_request.user.login }}
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
@@ -167,7 +187,7 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github-token }}
         REPO: ${{ github.repository }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
         NO_IMPACT: ${{ steps.parse.outputs.no_impact }}
       run: |
         set -euo pipefail
