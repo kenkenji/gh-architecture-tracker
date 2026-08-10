@@ -49,6 +49,10 @@ inputs:
     description: "Operation mode: 'new' for initial post, 'regenerate' for updating existing comment"
     required: false
     default: "new"
+  comment-id:
+    description: "Pre-posted processing comment ID (from post-processing-comment job)"
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -65,8 +69,17 @@ runs:
         PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
         REPO: ${{ github.repository }}
         MODE: ${{ inputs.mode }}
+        INPUT_COMMENT_ID: ${{ inputs.comment-id }}
       run: |
         set -euo pipefail
+
+        if [ -n "$INPUT_COMMENT_ID" ]; then
+          echo "already_posted=false" >> "$GITHUB_OUTPUT"
+          echo "comment_id=${INPUT_COMMENT_ID}" >> "$GITHUB_OUTPUT"
+          echo "existing_body_file=" >> "$GITHUB_OUTPUT"
+          echo "📋 Using pre-provided comment ID: ${INPUT_COMMENT_ID}"
+          exit 0
+        fi
 
         MARKER="## 🏗 Architecture Tracker"
         comment_id=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
@@ -109,7 +122,7 @@ runs:
 
     - name: Post processing status
       id: processing
-      if: steps.check.outputs.already_posted != 'true'
+      if: inputs.comment-id == '' && steps.check.outputs.already_posted != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
@@ -338,7 +351,7 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
         PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
         REPO: ${{ github.repository }}
-        COMMENT_ID: ${{ steps.processing.outputs.comment_id }}
+        COMMENT_ID: ${{ steps.processing.outputs.comment_id || steps.check.outputs.comment_id }}
         COMMENT_FILE: ${{ steps.build.outputs.comment_file }}
       run: |
         set -euo pipefail
