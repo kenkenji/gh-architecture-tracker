@@ -33,12 +33,17 @@ def parse_args():
     parser.add_argument("--ai-components", default="", help="JSON array of AI-suggested component ids")
     parser.add_argument("--no-impact", action="store_true", help="Mark as intentionally no impact")
     parser.add_argument("--model-version", default=None, help="Current model version from components.yaml")
+    parser.add_argument("--additions", type=int, default=None, help="Number of added lines")
+    parser.add_argument("--deletions", type=int, default=None, help="Number of deleted lines")
+    parser.add_argument("--changed-files", type=int, default=None, help="Number of changed files")
+    parser.add_argument("--labels", default=None, help="JSON array of label names")
     return parser.parse_args()
 
 
 def update_mappings(data, pr_number, pr_title, pr_url, merged_at, components,
                     author, timestamp, source="manual", ai_components=None,
-                    no_impact=False, model_version=None):
+                    no_impact=False, model_version=None,
+                    diff_stats=None, labels=None):
     if components and no_impact:
         no_impact = False
     entry = {
@@ -57,13 +62,17 @@ def update_mappings(data, pr_number, pr_title, pr_url, merged_at, components,
         entry["no_impact"] = True
     if model_version is not None:
         entry["model_version"] = model_version
+    if diff_stats is not None:
+        entry["diff_stats"] = diff_stats
+    if labels is not None:
+        entry["labels"] = labels
     data["mappings"][str(pr_number)] = entry
     return data
 
 
 def update_timeline(data, pr_number, pr_title, pr_url, components,
                     author, timestamp, source="manual", ai_components=None,
-                    no_impact=False):
+                    no_impact=False, diff_stats=None, labels=None):
     if components and no_impact:
         no_impact = False
     compact = timestamp.replace("-", "").replace(":", "").replace(".", "")
@@ -83,6 +92,10 @@ def update_timeline(data, pr_number, pr_title, pr_url, components,
         entry["ai_components"] = ai_components
     if no_impact:
         entry["no_impact"] = True
+    if diff_stats is not None:
+        entry["diff_stats"] = diff_stats
+    if labels is not None:
+        entry["labels"] = labels
 
     data["entries"].insert(0, entry)
     return data
@@ -92,7 +105,16 @@ def main():
     args = parse_args()
     components = json.loads(args.components)
     ai_components = json.loads(args.ai_components) if args.ai_components else None
+    labels = json.loads(args.labels) if args.labels else None
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    diff_stats = None
+    if args.additions is not None and args.deletions is not None and args.changed_files is not None:
+        diff_stats = {
+            "additions": args.additions,
+            "deletions": args.deletions,
+            "changed_files": args.changed_files,
+        }
 
     with open(args.mappings_file, encoding="utf-8") as f:
         mappings_data = json.load(f)
@@ -105,12 +127,13 @@ def main():
         args.merged_at, components, args.author, now,
         source=args.source, ai_components=ai_components,
         no_impact=args.no_impact, model_version=args.model_version,
+        diff_stats=diff_stats, labels=labels,
     )
     timeline_data = update_timeline(
         timeline_data, args.pr_number, args.pr_title, args.pr_url,
         components, args.author, now,
         source=args.source, ai_components=ai_components,
-        no_impact=args.no_impact,
+        no_impact=args.no_impact, diff_stats=diff_stats, labels=labels,
     )
 
     with open(args.mappings_file, "w", encoding="utf-8") as f:

@@ -78,7 +78,7 @@ runs:
 
         echo "skip=false" >> "$GITHUB_OUTPUT"
         gh api "repos/${REPO}/pulls/${ISSUE_NUMBER}" \
-          --jq '"pr_title=\(.title)\npr_url=\(.html_url)\nmerged_at=\(.merged_at)"' \
+          --jq '"pr_title=\(.title)\npr_url=\(.html_url)\nmerged_at=\(.merged_at)\nadditions=\(.additions)\ndeletions=\(.deletions)\nchanged_files=\(.changed_files)\nlabels=\([.labels[].name])"' \
           >> "$GITHUB_OUTPUT"
 
     - name: Set result
@@ -98,6 +98,10 @@ runs:
         PR_TITLE: ${{ steps.pr-info.outputs.pr_title }}
         PR_URL: ${{ steps.pr-info.outputs.pr_url }}
         MERGED_AT: ${{ steps.pr-info.outputs.merged_at }}
+        ADDITIONS: ${{ steps.pr-info.outputs.additions }}
+        DELETIONS: ${{ steps.pr-info.outputs.deletions }}
+        CHANGED_FILES: ${{ steps.pr-info.outputs.changed_files }}
+        LABELS: ${{ steps.pr-info.outputs.labels }}
         COMPONENTS: ${{ steps.parse.outputs.components }}
         SOURCE: ${{ steps.parse.outputs.source }}
         AI_COMPONENTS: ${{ steps.parse.outputs.ai_components }}
@@ -134,6 +138,16 @@ runs:
           fi
 
           # データ更新
+          diff_stats_args=()
+          if [ -n "$ADDITIONS" ] && [ -n "$DELETIONS" ] && [ -n "$CHANGED_FILES" ]; then
+            diff_stats_args=(--additions "$ADDITIONS" --deletions "$DELETIONS" --changed-files "$CHANGED_FILES")
+          fi
+
+          labels_args=()
+          if [ -n "$LABELS" ] && [ "$LABELS" != "[]" ]; then
+            labels_args=(--labels "$LABELS")
+          fi
+
           python3 "${ACTION_PATH}/update_data.py" \
             --mappings-file "${work_dir}/mappings.json" \
             --timeline-file "${work_dir}/timeline.json" \
@@ -145,7 +159,9 @@ runs:
             --author "$AUTHOR" \
             --source "$SOURCE" \
             "${ai_args[@]}" \
-            "${model_version_args[@]}"
+            "${model_version_args[@]}" \
+            "${diff_stats_args[@]}" \
+            "${labels_args[@]}"
 
           # コミット & プッシュ
           cd "$work_dir"

@@ -93,6 +93,22 @@ runs:
         echo "no_impact=${no_impact}" >> "$GITHUB_OUTPUT"
         echo "Checked components (catch-up): ${components} (source: ${source}, no_impact: ${no_impact})"
 
+    - name: Fetch PR diff stats and labels
+      id: pr-stats
+      if: steps.parse.outputs.skip != 'true'
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
+      run: |
+        set -euo pipefail
+
+        gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
+          --jq '"additions=\(.additions)\ndeletions=\(.deletions)\nchanged_files=\(.changed_files)\nlabels=\([.labels[].name])"' \
+          >> "$GITHUB_OUTPUT"
+
     - name: Update data branch
       if: steps.parse.outputs.skip != 'true'
       shell: bash
@@ -104,6 +120,10 @@ runs:
         PR_TITLE: ${{ inputs.pr-title || github.event.pull_request.title }}
         PR_URL: ${{ inputs.pr-url || github.event.pull_request.html_url }}
         MERGED_AT: ${{ inputs.merged-at || github.event.pull_request.merged_at }}
+        ADDITIONS: ${{ steps.pr-stats.outputs.additions }}
+        DELETIONS: ${{ steps.pr-stats.outputs.deletions }}
+        CHANGED_FILES: ${{ steps.pr-stats.outputs.changed_files }}
+        LABELS: ${{ steps.pr-stats.outputs.labels }}
         COMPONENTS: ${{ steps.parse.outputs.components }}
         SOURCE: ${{ steps.parse.outputs.source }}
         AI_COMPONENTS: ${{ steps.parse.outputs.ai_components }}
@@ -139,6 +159,16 @@ runs:
             model_version_args=(--model-version "$model_version")
           fi
 
+          diff_stats_args=()
+          if [ -n "$ADDITIONS" ] && [ -n "$DELETIONS" ] && [ -n "$CHANGED_FILES" ]; then
+            diff_stats_args=(--additions "$ADDITIONS" --deletions "$DELETIONS" --changed-files "$CHANGED_FILES")
+          fi
+
+          labels_args=()
+          if [ -n "$LABELS" ] && [ "$LABELS" != "[]" ]; then
+            labels_args=(--labels "$LABELS")
+          fi
+
           python3 "${RECORD_MAPPING_DIR}/update_data.py" \
             --mappings-file "${work_dir}/mappings.json" \
             --timeline-file "${work_dir}/timeline.json" \
@@ -150,7 +180,9 @@ runs:
             --author "$AUTHOR" \
             --source "$SOURCE" \
             "${ai_args[@]}" \
-            "${model_version_args[@]}"
+            "${model_version_args[@]}" \
+            "${diff_stats_args[@]}" \
+            "${labels_args[@]}"
 
           cd "$work_dir"
           git config user.name "github-actions[bot]"
