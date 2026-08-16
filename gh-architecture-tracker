@@ -366,10 +366,11 @@ cmd_init() {
   # ファイルコピー
   info "ファイルをコピーしています..."
 
-  # .github/workflows/ (architecture-tracker.yml のみ配布)
+  # .github/workflows/
   mkdir -p "${root}/.github/workflows"
   cp "${DIST_DIR}/.github/workflows/architecture-tracker.yml" "${root}/.github/workflows/"
-  ok ".github/workflows/architecture-tracker.yml"
+  cp "${DIST_DIR}/.github/workflows/impact-analysis.yml" "${root}/.github/workflows/"
+  ok ".github/workflows/architecture-tracker.yml, impact-analysis.yml"
 
   # 旧バージョンの init ワークフローが残っている場合は削除
   if [ -f "${root}/.github/workflows/architecture-tracker-init.yml" ]; then
@@ -378,7 +379,7 @@ cmd_init() {
   fi
 
   # .github/actions/
-  local actions=("track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa" "detect-model-changes" "bump-model-version")
+  local actions=("track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa" "detect-model-changes" "bump-model-version" "analyze-impact")
   local action_count=0
   for action in "${actions[@]}"; do
     if [ -d "${DIST_DIR}/.github/actions/${action}" ]; then
@@ -401,7 +402,7 @@ cmd_init() {
     info "変更をコミット・プッシュします..."
 
     cd "$root"
-    local add_targets=(.github/workflows/architecture-tracker.yml)
+    local add_targets=(.github/workflows/architecture-tracker.yml .github/workflows/impact-analysis.yml)
     for action in "${actions[@]}"; do
       if [ -d ".github/actions/${action}" ]; then
         add_targets+=(".github/actions/${action}")
@@ -528,9 +529,10 @@ cmd_update() {
 
   info "ファイルを更新しています..."
 
-  # ワークフロー (architecture-tracker.yml のみ配布)
+  # ワークフロー
   cp "${DIST_DIR}/.github/workflows/architecture-tracker.yml" "${root}/.github/workflows/"
-  ok ".github/workflows/architecture-tracker.yml"
+  cp "${DIST_DIR}/.github/workflows/impact-analysis.yml" "${root}/.github/workflows/"
+  ok ".github/workflows/architecture-tracker.yml, impact-analysis.yml"
 
   # 旧バージョンの init ワークフローが残っている場合は削除
   if [ -f "${root}/.github/workflows/architecture-tracker-init.yml" ]; then
@@ -539,7 +541,7 @@ cmd_update() {
   fi
 
   # Composite Actions
-  local actions=("track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa" "detect-model-changes" "bump-model-version")
+  local actions=("track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa" "detect-model-changes" "bump-model-version" "analyze-impact")
   for action in "${actions[@]}"; do
     if [ -d "${DIST_DIR}/.github/actions/${action}" ]; then
       mkdir -p "${root}/.github/actions/${action}"
@@ -552,7 +554,7 @@ cmd_update() {
     info "--no-push が指定されたため、コミット・プッシュはスキップします。"
   else
     cd "$root"
-    local add_targets=(.github/workflows/architecture-tracker.yml)
+    local add_targets=(.github/workflows/architecture-tracker.yml .github/workflows/impact-analysis.yml)
     for action in "${actions[@]}"; do
       if [ -d ".github/actions/${action}" ]; then
         add_targets+=(".github/actions/${action}")

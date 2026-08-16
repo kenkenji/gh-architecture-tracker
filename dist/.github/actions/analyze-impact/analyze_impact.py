@@ -1,0 +1,461 @@
+#!/usr/bin/env python3
+"""
+Issueの内容とアーキテクチャモデルから影響範囲を分析し、
+結果をIssueコメントとして投稿するスクリプト。
+
+環境変数 ANTHROPIC_API_KEY、OPENAI_API_KEY、CLAUDE_CODE_OAUTH_TOKEN の
+いずれかが設定されている場合に対応するプロバイダーを使用する。
+優先順位: ANTHROPIC_API_KEY > OPENAI_API_KEY > CLAUDE_CODE_OAUTH_TOKEN
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+import yaml
+
+DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
+DEFAULT_OPENAI_MODEL = "gpt-4o"
+
+
+def detect_provider():
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "anthropic"
+    if os.environ.get("OPENAI_API_KEY"):
+        return "openai"
+    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        return "claude-code"
+    return None
+
+
+def call_anthropic(prompt, model=None, max_retries=2):
+    import anthropic
+
+    model = model or DEFAULT_ANTHROPIC_MODEL
+    client = anthropic.Anthropic(timeout=120.0)
+    for attempt in range(max_retries + 1):
+        try:
+            response = client.messages.create(
+                model=model,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.content[0].text
+        except anthropic.RateLimitError:
+            if attempt < max_retries:
+                wait = 2 ** (attempt + 1)
+                print(f"Rate limited, retrying in {wait}s...", file=sys.stderr)
+                time.sleep(wait)
+            else:
+                raise
+        except anthropic.APITimeoutError:
+            if attempt < max_retries:
+                wait = 2 ** (attempt + 1)
+                print(f"Timeout, retrying in {wait}s...", file=sys.stderr)
+                time.sleep(wait)
+            else:
+                raise
+
+
+def call_openai(prompt, model=None, max_retries=2):
+    import openai
+
+    model = model or DEFAULT_OPENAI_MODEL
+    client = openai.OpenAI(timeout=120.0)
+    for attempt in range(max_retries + 1):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.choices[0].message.content
+        except openai.RateLimitError:
+            if attempt < max_retries:
+                wait = 2 ** (attempt + 1)
+                print(f"Rate limited, retrying in {wait}s...", file=sys.stderr)
+                time.sleep(wait)
+            else:
+                raise
+        except openai.APITimeoutError:
+            if attempt < max_retries:
+                wait = 2 ** (attempt + 1)
+                print(f"Timeout, retrying in {wait}s...", file=sys.stderr)
+                time.sleep(wait)
+            else:
+                raise
+
+
+def call_claude_code(prompt, model=None, max_retries=2):
+    model = model or DEFAULT_ANTHROPIC_MODEL
+    cmd = ["claude", "-p", prompt, "--output-format", "text", "--model", model]
+
+    for attempt in range(max_retries + 1):
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=180,
+            )
+            if result.returncode != 0:
+                if attempt < max_retries:
+                    wait = 2 ** (attempt + 1)
+                    print(
+                        f"CLI exited with code {result.returncode}, retrying in {wait}s...",
+                        file=sys.stderr,
+                    )
+                    time.sleep(wait)
+                    continue
+                raise RuntimeError(
+                    f"claude CLI exited with code {result.returncode}: {result.stderr.strip()}"
+                )
+            return result.stdout.strip()
+        except subprocess.TimeoutExpired:
+            if attempt < max_retries:
+                wait = 2 ** (attempt + 1)
+                print(f"CLI timeout, retrying in {wait}s...", file=sys.stderr)
+                time.sleep(wait)
+            else:
+                raise RuntimeError("claude CLI timed out after all retries")
+
+
+def parse_llm_response(response_text):
+    text = response_text.strip()
+    depth = 0
+    start = -1
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                try:
+                    return json.loads(text[start : i + 1])
+                except json.JSONDecodeError:
+                    start = -1
+    return json.loads(text)
+
+
+def format_components_for_prompt(components_data):
+    components = components_data.get("components", [])
+    relations = components_data.get("relations", [])
+
+    lines = []
+    lines.append("#### コンポーネント一覧")
+    for c in components:
+        comp_id = c.get("id", "")
+        level = c.get("level", "")
+        if not comp_id or not level:
+            continue
+        parent = c.get("parent", "")
+        tech = c.get("technology", "")
+        tags = c.get("tags", [])
+        tags_str = f" [tags: {', '.join(tags)}]" if tags else ""
+        lines.append(
+            f"- `{comp_id}` ({level}, parent: {parent}): "
+            f"{c.get('name', '')} — {c.get('description', '')} [{tech}]{tags_str}"
+        )
+
+    if relations:
+        lines.append("")
+        lines.append("#### コンポーネント間の関係")
+        for r in relations:
+            r_from = r.get("from", "")
+            r_to = r.get("to", "")
+            if not r_from or not r_to:
+                continue
+            lines.append(
+                f"- `{r_from}` → `{r_to}`: {r.get('description', '')} [{r.get('technology', '')}]"
+            )
+
+    return "\n".join(lines)
+
+
+def format_mappings_for_prompt(mappings_data):
+    mappings = mappings_data.get("mappings", {})
+    if not mappings:
+        return "(変更履歴なし)"
+
+    sorted_entries = sorted(
+        mappings.values(),
+        key=lambda m: m.get("merged_at") or m.get("timestamp", ""),
+        reverse=True,
+    )
+    recent = sorted_entries[:30]
+
+    lines = []
+    for m in recent:
+        pr_num = m.get("pr_number", "?")
+        pr_title = m.get("pr_title", "")
+        comps = ", ".join(m.get("components", []))
+        merged_at = m.get("merged_at", "")
+        if merged_at:
+            merged_at = merged_at[:10]
+        lines.append(f"- PR #{pr_num}: {pr_title} → [{comps}] ({merged_at})")
+
+    return "\n".join(lines)
+
+
+def build_prompt(template, components_data, mappings_data, issue_text):
+    components_text = format_components_for_prompt(components_data)
+    mappings_text = format_mappings_for_prompt(mappings_data)
+
+    sentinel_components = "\x00COMPONENTS\x00"
+    sentinel_mappings = "\x00MAPPINGS\x00"
+    sentinel_issue = "\x00ISSUE\x00"
+
+    result = template
+    result = result.replace("{components}", sentinel_components)
+    result = result.replace("{mappings}", sentinel_mappings)
+    result = result.replace("{issue}", sentinel_issue)
+
+    result = result.replace(sentinel_components, components_text)
+    result = result.replace(sentinel_mappings, mappings_text)
+    result = result.replace(sentinel_issue, issue_text)
+    return result
+
+
+def validate_component_ids(affected_components, components_data):
+    valid_ids = {
+        c.get("id")
+        for c in components_data.get("components", [])
+        if c.get("level") in ("container", "component")
+    }
+    validated = []
+    seen = set()
+    for item in affected_components:
+        if not isinstance(item, dict):
+            print(f"Warning: non-dict item in affected_components, skipping", file=sys.stderr)
+            continue
+        cid = item.get("id", "")
+        if cid not in valid_ids:
+            print(f"Warning: invalid component ID '{cid}' returned by LLM, skipping", file=sys.stderr)
+            continue
+        if cid in seen:
+            continue
+        seen.add(cid)
+        validated.append(item)
+    return validated
+
+
+def validate_related_prs(related_prs, mappings_data):
+    known_prs = set()
+    for pr_num_str, mapping in mappings_data.get("mappings", {}).items():
+        known_prs.add(int(mapping.get("pr_number", pr_num_str)))
+
+    validated = []
+    seen = set()
+    for pr in related_prs:
+        if not isinstance(pr, dict):
+            print(f"Warning: non-dict item in related_prs, skipping", file=sys.stderr)
+            continue
+        pr_num = pr.get("pr_number")
+        if not isinstance(pr_num, int):
+            continue
+        if pr_num not in known_prs:
+            print(f"Warning: PR #{pr_num} not found in mappings, skipping", file=sys.stderr)
+            continue
+        if pr_num in seen:
+            continue
+        seen.add(pr_num)
+        validated.append(pr)
+    return validated
+
+
+def get_component_name(comp_id, components_data):
+    for c in components_data.get("components", []):
+        if c.get("id") == comp_id:
+            return c.get("name", comp_id)
+    return comp_id
+
+
+def get_recent_prs_for_component(comp_id, mappings_data, limit=5):
+    prs = []
+    for _key, m in mappings_data.get("mappings", {}).items():
+        if comp_id in m.get("components", []):
+            prs.append(m)
+
+    prs.sort(
+        key=lambda m: m.get("merged_at") or m.get("timestamp", ""),
+        reverse=True,
+    )
+    return prs[:limit]
+
+
+def get_model_last_updated(components_data, timeline_data):
+    entries = timeline_data.get("entries", [])
+    if entries:
+        return entries[0].get("timestamp", "")[:10]
+
+    version = components_data.get("version", "")
+    if version:
+        return f"version {version}"
+    return "不明"
+
+
+def build_comment(analysis, components_data, mappings_data, timeline_data):
+    lines = []
+    lines.append("## 🏗 Architecture Tracker — 影響範囲分析")
+    lines.append("")
+
+    affected = analysis.get("affected_components", [])
+    if affected:
+        lines.append("### 影響コンポーネント")
+        lines.append("")
+        for item in affected:
+            comp_id = item["id"]
+            comp_name = get_component_name(comp_id, components_data)
+            reason = item.get("reason", "")
+            lines.append(f"- **{comp_name}** (`{comp_id}`): {reason}")
+
+            recent_prs = get_recent_prs_for_component(comp_id, mappings_data)
+            if recent_prs:
+                lines.append(f"  <details><summary>直近の変更 ({len(recent_prs)}件)</summary>")
+                lines.append("")
+                for pr in recent_prs:
+                    pr_num = pr.get("pr_number", "?")
+                    pr_title = pr.get("pr_title", "")
+                    merged_at = (pr.get("merged_at") or "")[:10]
+                    lines.append(f"  - #{pr_num} {pr_title} ({merged_at})")
+                lines.append("")
+                lines.append("  </details>")
+        lines.append("")
+    else:
+        lines.append("### 影響コンポーネント")
+        lines.append("")
+        lines.append("影響を受けるコンポーネントは特定されませんでした。")
+        lines.append("")
+
+    related_prs = analysis.get("related_prs", [])
+    if related_prs:
+        lines.append("### 関連PR")
+        lines.append("")
+        for pr in related_prs:
+            pr_num = pr.get("pr_number", "?")
+            pr_title = pr.get("pr_title", "")
+            reason = pr.get("reason", "")
+            lines.append(f"- #{pr_num} {pr_title} — {reason}")
+        lines.append("")
+
+    risks = analysis.get("risks", [])
+    if risks:
+        lines.append("### リスク・注意点")
+        lines.append("")
+        for risk in risks:
+            lines.append(f"- ⚠️ {risk}")
+        lines.append("")
+
+    last_updated = get_model_last_updated(components_data, timeline_data)
+    lines.append("---")
+    lines.append(f"*この分析はアーキテクチャモデル（最終更新: {last_updated}）に基づいています。*")
+
+    return "\n".join(lines)
+
+
+def post_comment(repo, issue_number, body):
+    body_file = None
+    try:
+        body_file = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".md", delete=False, encoding="utf-8"
+        )
+        body_file.write(body)
+        body_file.close()
+
+        cmd = [
+            "gh", "api",
+            f"repos/{repo}/issues/{issue_number}/comments",
+            "--method", "POST",
+            "-F", f"body=@{body_file.name}",
+            "--jq", ".id",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to post comment: {result.stderr.strip()}")
+        comment_id = result.stdout.strip()
+        print(f"✅ Posted analysis comment (id: {comment_id}) on issue #{issue_number}")
+        return comment_id
+    finally:
+        if body_file:
+            os.unlink(body_file.name)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Issueから影響範囲を分析する")
+    parser.add_argument("--components-file", required=True)
+    parser.add_argument("--mappings-file", required=True)
+    parser.add_argument("--timeline-file", required=True)
+    parser.add_argument("--issue-file", required=True)
+    parser.add_argument("--issue-number", required=True)
+    parser.add_argument("--prompt-template", required=True)
+    parser.add_argument("--repo", required=True)
+    parser.add_argument("--model", default="")
+    args = parser.parse_args()
+
+    provider = detect_provider()
+    if provider is None:
+        print(
+            "No API key found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    with open(args.components_file, encoding="utf-8") as f:
+        components_data = yaml.safe_load(f) or {}
+
+    with open(args.mappings_file, encoding="utf-8") as f:
+        mappings_data = json.load(f) if os.path.getsize(args.mappings_file) > 2 else {}
+
+    with open(args.timeline_file, encoding="utf-8") as f:
+        timeline_data = json.load(f) if os.path.getsize(args.timeline_file) > 2 else {}
+
+    with open(args.issue_file, encoding="utf-8") as f:
+        issue_text = f.read()
+
+    with open(args.prompt_template, encoding="utf-8") as f:
+        template = f.read()
+
+    prompt = build_prompt(template, components_data, mappings_data, issue_text)
+
+    try:
+        model = args.model or None
+        if provider == "anthropic":
+            raw_response = call_anthropic(prompt, model)
+        elif provider == "openai":
+            raw_response = call_openai(prompt, model)
+        else:
+            raw_response = call_claude_code(prompt, model)
+
+        analysis = parse_llm_response(raw_response)
+
+        affected = analysis.get("affected_components", [])
+        analysis["affected_components"] = validate_component_ids(affected, components_data)
+
+        related_prs = analysis.get("related_prs", [])
+        analysis["related_prs"] = validate_related_prs(related_prs, mappings_data)
+
+        comment_body = build_comment(
+            analysis, components_data, mappings_data, timeline_data
+        )
+        post_comment(args.repo, args.issue_number, comment_body)
+
+        print(f"Provider: {provider}")
+        print(f"Affected components: {len(analysis['affected_components'])}")
+        print(f"Related PRs: {len(analysis['related_prs'])}")
+        print(f"Risks: {len(analysis.get('risks', []))}")
+
+    except json.JSONDecodeError as e:
+        print(f"Failed to parse LLM response as JSON: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    except Exception as e:
+        print(f"Analysis failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
