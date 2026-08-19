@@ -220,6 +220,9 @@ def build_prompt(template, components_data, mappings_data, issue_text):
     return result
 
 
+VALID_IMPACT_LEVELS = {"high", "medium", "low"}
+
+
 def validate_component_ids(affected_components, components_data):
     valid_ids = {
         c.get("id")
@@ -239,7 +242,14 @@ def validate_component_ids(affected_components, components_data):
         if cid in seen:
             continue
         seen.add(cid)
+        raw_level = (item.get("impact_level") or "").lower().strip()
+        if raw_level not in VALID_IMPACT_LEVELS:
+            print(f"Warning: invalid impact_level '{item.get('impact_level')}', defaulting to medium", file=sys.stderr)
+            raw_level = "medium"
+        item["impact_level"] = raw_level
         validated.append(item)
+    level_order = {"high": 0, "medium": 1, "low": 2}
+    validated.sort(key=lambda x: level_order.get(x.get("impact_level", "medium"), 1))
     return validated
 
 
@@ -267,11 +277,16 @@ def validate_related_prs(related_prs, mappings_data):
     return validated
 
 
-def get_component_name(comp_id, components_data):
-    for c in components_data.get("components", []):
-        if c.get("id") == comp_id:
-            return c.get("name", comp_id)
-    return comp_id
+def build_component_index(components_data):
+    return {c["id"]: c for c in components_data.get("components", []) if "id" in c}
+
+
+def get_component_info(comp_id, comp_index):
+    return comp_index.get(comp_id, {"id": comp_id, "name": comp_id})
+
+
+def get_component_name(comp_id, comp_index):
+    return get_component_info(comp_id, comp_index).get("name", comp_id)
 
 
 def get_recent_prs_for_component(comp_id, mappings_data, limit=5):
@@ -298,20 +313,72 @@ def get_model_last_updated(components_data, timeline_data):
     return "不明"
 
 
+IMPACT_BADGE = {
+    "high": "🔴 高",
+    "medium": "🟡 中",
+    "low": "🟢 低",
+}
+
+
+def get_affected_relations(affected_ids, components_data):
+    relations = components_data.get("relations", [])
+    affected_set = set(affected_ids)
+    result = []
+    for r in relations:
+        r_from = r.get("from", "")
+        r_to = r.get("to", "")
+        if r_from in affected_set and r_to in affected_set:
+            result.append(r)
+    return result
+
+
 def build_comment(analysis, components_data, mappings_data, timeline_data):
+    comp_index = build_component_index(components_data)
+
     lines = []
     lines.append("## 🏗 Architecture Tracker — 影響範囲分析")
     lines.append("")
 
+    summary = analysis.get("summary", "").replace("\n", " ").strip()
+    if summary:
+        lines.append(f"> {summary}")
+        lines.append("")
+
     affected = analysis.get("affected_components", [])
     if affected:
-        lines.append("### 影響コンポーネント")
+        count_by_level = {}
+        for item in affected:
+            level = item.get("impact_level", "medium")
+            count_by_level[level] = count_by_level.get(level, 0) + 1
+        level_summary = " / ".join(
+            f"{badge} {count_by_level[lv]}件"
+            for lv, badge in IMPACT_BADGE.items()
+            if lv in count_by_level
+        )
+
+        lines.append(f"### 影響コンポーネント ({len(affected)}件: {level_summary})")
         lines.append("")
+
         for item in affected:
             comp_id = item["id"]
-            comp_name = get_component_name(comp_id, components_data)
+            comp_info = get_component_info(comp_id, comp_index)
+            comp_name = comp_info.get("name", comp_id)
+            parent = comp_info.get("parent", "")
+            tech = comp_info.get("technology", "")
+            impact_level = item.get("impact_level", "medium")
+            badge = IMPACT_BADGE.get(impact_level, "")
             reason = item.get("reason", "")
-            lines.append(f"- **{comp_name}** (`{comp_id}`): {reason}")
+
+            parent_label = ""
+            if parent:
+                parent_name = get_component_name(parent, comp_index)
+                parent_label = f" / {parent_name}"
+
+            tech_label = f" `{tech}`" if tech else ""
+
+            lines.append(f"- {badge} **{comp_name}** (`{comp_id}`{parent_label}){tech_label}<br>")
+            if reason:
+                lines.append(f"  {reason}")
 
             recent_prs = get_recent_prs_for_component(comp_id, mappings_data)
             if recent_prs:
@@ -324,7 +391,21 @@ def build_comment(analysis, components_data, mappings_data, timeline_data):
                     lines.append(f"  - #{pr_num} {pr_title} ({merged_at})")
                 lines.append("")
                 lines.append("  </details>")
-        lines.append("")
+            lines.append("")
+
+        affected_ids = [item["id"] for item in affected]
+        affected_relations = get_affected_relations(affected_ids, components_data)
+        if affected_relations:
+            lines.append("#### 影響コンポーネント間の関連")
+            lines.append("")
+            for r in affected_relations:
+                from_name = get_component_name(r["from"], comp_index)
+                to_name = get_component_name(r["to"], comp_index)
+                desc = r.get("description", "")
+                tech = r.get("technology", "")
+                tech_label = f" [{tech}]" if tech else ""
+                lines.append(f"- {from_name} → {to_name}: {desc}{tech_label}")
+            lines.append("")
     else:
         lines.append("### 影響コンポーネント")
         lines.append("")
