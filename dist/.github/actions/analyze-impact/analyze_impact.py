@@ -332,11 +332,14 @@ def get_affected_relations(affected_ids, components_data):
     return result
 
 
+COMMENT_MARKER = "## 🏗 Architecture Tracker — 影響範囲分析"
+
+
 def build_comment(analysis, components_data, mappings_data, timeline_data):
     comp_index = build_component_index(components_data)
 
     lines = []
-    lines.append("## 🏗 Architecture Tracker — 影響範囲分析")
+    lines.append(COMMENT_MARKER)
     lines.append("")
 
     summary = analysis.get("summary", "").replace("\n", " ").strip()
@@ -438,7 +441,27 @@ def build_comment(analysis, components_data, mappings_data, timeline_data):
     return "\n".join(lines)
 
 
+def find_existing_comment(repo, issue_number):
+    jq_filter = '.[] | select(.body | startswith("' + COMMENT_MARKER.replace('"', '\\"') + '")) | .id'
+    cmd = [
+        "gh", "api",
+        f"repos/{repo}/issues/{issue_number}/comments",
+        "--paginate",
+        "--jq", jq_filter,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if result.returncode != 0:
+        print(f"Warning: failed to search existing comments: {result.stderr.strip()}",
+              file=sys.stderr)
+        return None
+    ids = result.stdout.strip().splitlines()
+    if ids and ids[-1]:
+        return ids[-1]
+    return None
+
+
 def post_comment(repo, issue_number, body):
+    existing_id = find_existing_comment(repo, issue_number)
     body_file = None
     try:
         body_file = tempfile.NamedTemporaryFile(
@@ -447,10 +470,16 @@ def post_comment(repo, issue_number, body):
         body_file.write(body)
         body_file.close()
 
+        if existing_id:
+            url = f"repos/{repo}/issues/comments/{existing_id}"
+            method = "PATCH"
+        else:
+            url = f"repos/{repo}/issues/{issue_number}/comments"
+            method = "POST"
+
         cmd = [
-            "gh", "api",
-            f"repos/{repo}/issues/{issue_number}/comments",
-            "--method", "POST",
+            "gh", "api", url,
+            "--method", method,
             "-F", f"body=@{body_file.name}",
             "--jq", ".id",
         ]
@@ -458,7 +487,8 @@ def post_comment(repo, issue_number, body):
         if result.returncode != 0:
             raise RuntimeError(f"Failed to post comment: {result.stderr.strip()}")
         comment_id = result.stdout.strip()
-        print(f"✅ Posted analysis comment (id: {comment_id}) on issue #{issue_number}")
+        action = "Updated" if existing_id else "Posted"
+        print(f"✅ {action} analysis comment (id: {comment_id}) on issue #{issue_number}")
         return comment_id
     finally:
         if body_file:
@@ -475,6 +505,7 @@ def main():
     parser.add_argument("--prompt-template", required=True)
     parser.add_argument("--repo", required=True)
     parser.add_argument("--model", default="")
+    parser.add_argument("--issue-comment-file", default="")
     args = parser.parse_args()
 
     provider = detect_provider()
@@ -496,6 +527,12 @@ def main():
 
     with open(args.issue_file, encoding="utf-8") as f:
         issue_text = f.read()
+
+    if args.issue_comment_file:
+        with open(args.issue_comment_file, encoding="utf-8") as f:
+            comment_text = f.read().strip()
+        if comment_text:
+            issue_text += f"\n\n---\n追加コメント:\n{comment_text}"
 
     with open(args.prompt_template, encoding="utf-8") as f:
         template = f.read()

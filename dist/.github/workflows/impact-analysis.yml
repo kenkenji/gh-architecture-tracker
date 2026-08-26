@@ -3,6 +3,8 @@ name: Impact Analysis
 on:
   issues:
     types: [opened]
+  issue_comment:
+    types: [created]
 
 concurrency:
   group: impact-analysis-${{ github.event.issue.number }}
@@ -10,7 +12,18 @@ concurrency:
 
 jobs:
   analyze:
-    if: contains(github.event.issue.body, '@architecture-tracker')
+    if: >-
+      (
+        github.event_name == 'issues'
+        && contains(github.event.issue.body, '@architecture-tracker')
+      )
+      || (
+        github.event_name == 'issue_comment'
+        && !github.event.issue.pull_request
+        && github.event.comment.user.type != 'Bot'
+        && github.actor != 'github-actions[bot]'
+        && contains(github.event.comment.body, '@architecture-tracker')
+      )
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -38,3 +51,4 @@ jobs:
           issue-number: ${{ github.event.issue.number }}
           issue-title: ${{ github.event.issue.title }}
           issue-body: ${{ github.event.issue.body }}
+          issue-comment-body: ${{ github.event.comment.body || '' }}
