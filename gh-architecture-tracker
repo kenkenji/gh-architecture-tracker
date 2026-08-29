@@ -100,6 +100,43 @@ sed_inplace() {
   fi
 }
 
+version_gt() {
+  local v1="$1" v2="$2"
+  local IFS='.'
+  read -ra parts1 <<< "$v1"
+  read -ra parts2 <<< "$v2"
+  local max=$(( ${#parts1[@]} > ${#parts2[@]} ? ${#parts1[@]} : ${#parts2[@]} ))
+  for (( i=0; i<max; i++ )); do
+    local n1=${parts1[$i]:-0}
+    local n2=${parts2[$i]:-0}
+    if (( n1 > n2 )); then return 0; fi
+    if (( n1 < n2 )); then return 1; fi
+  done
+  return 1
+}
+
+check_latest_version() {
+  if [ "$VERSION" = "dev" ]; then return 0; fi
+  local remote_version
+  remote_version=$(gh api "repos/kenkenji/gh-architecture-tracker/contents/VERSION" \
+    --jq '.content' 2>/dev/null) || return 0
+  if [ -z "$remote_version" ]; then return 0; fi
+  local decoded
+  decoded=$(echo "$remote_version" | base64 -d 2>/dev/null) || decoded=$(echo "$remote_version" | base64 --decode 2>/dev/null) || return 0
+  remote_version=$(echo "$decoded" | tr -d '[:space:]')
+  if [ -z "$remote_version" ]; then return 0; fi
+  if version_gt "$remote_version" "$VERSION"; then
+    echo ""
+    warn "gh extension のバージョンが古くなっています"
+    echo "  ローカル: v${VERSION}"
+    echo "  最新:     v${remote_version}"
+    echo ""
+    info "以下のコマンドで更新できます:"
+    echo "  gh extension upgrade architecture-tracker"
+    echo ""
+  fi
+}
+
 create_data_branch() {
   local remote_url
   remote_url=$(git remote get-url origin)
@@ -343,6 +380,9 @@ cmd_init() {
   require_git_repo
   require_default_branch
   require_dist
+
+  check_latest_version
+
   require_app_installed
 
   local root
@@ -499,6 +539,8 @@ cmd_update() {
   require_git_repo
   require_default_branch
   require_dist
+
+  check_latest_version
 
   local root
   root=$(get_repo_root)
