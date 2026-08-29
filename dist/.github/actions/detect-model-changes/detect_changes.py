@@ -144,10 +144,15 @@ def call_claude_code(prompt, model=None, max_retries=2):
 
 
 def parse_llm_response(response_text):
+    """raw_decode()で最初のJSONオブジェクトのみをパースし、後続データは無視する。"""
     text = response_text.strip()
-    json_match = re.search(r"\{[\s\S]*\}", text)
-    if json_match:
-        return json.loads(json_match.group())
+
+    decoder = json.JSONDecoder()
+    idx = text.find("{")
+    if idx != -1:
+        result, _ = decoder.raw_decode(text, idx)
+        return result
+
     return json.loads(text)
 
 

@@ -9,7 +9,6 @@ LLM APIを呼び出してPR Descriptionから影響コンポーネントを抽�
 
 import json
 import os
-import re
 import subprocess
 import sys
 import argparse
@@ -72,12 +71,17 @@ def build_prompt(template, components_text, pr_description):
 
 
 def parse_llm_response(response_text):
-    """LLMレスポンスからJSONを抽出してパースする"""
+    """LLMレスポンスからJSONを抽出してパースする。
+    raw_decode()で最初のJSONオブジェクトのみをパースし、
+    後続のテキストやJSONブロックは無視する。"""
     text = response_text.strip()
 
-    json_match = re.search(r"\{[\s\S]*\}", text)
-    if json_match:
-        return json.loads(json_match.group())
+    decoder = json.JSONDecoder()
+    # テキスト中の最初の '{' を見つけてそこからパースする
+    idx = text.find("{")
+    if idx != -1:
+        result, _ = decoder.raw_decode(text, idx)
+        return result
 
     return json.loads(text)
 
