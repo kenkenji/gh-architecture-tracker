@@ -346,7 +346,7 @@ jobs:
     needs: [post-processing-comment, detect-changes]
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       pull-requests: write
       issues: write
     steps:
@@ -376,9 +376,12 @@ jobs:
             echo "model=${model}" >> "$GITHUB_OUTPUT"
             spa_url=$(echo "$config_yaml" | grep -A1 '^spa:' | grep 'url:' | sed 's/.*url:[[:space:]]*//' | sed 's/[[:space:]]*#.*//' | tr -d '[:space:]' | sed 's/^"\(.*\)"$/\1/' | sed "s/^'\(.*\)'$/\1/" || true)
             echo "spa_url=${spa_url}" >> "$GITHUB_OUTPUT"
+            auto_approve=$(echo "$config_yaml" | grep '^auto_approve:' | sed 's/.*auto_approve:[[:space:]]*//' | sed 's/[[:space:]]*#.*//' | tr -d '[:space:]' || true)
+            echo "auto_approve=${auto_approve}" >> "$GITHUB_OUTPUT"
           else
             echo "model=" >> "$GITHUB_OUTPUT"
             echo "spa_url=" >> "$GITHUB_OUTPUT"
+            echo "auto_approve=" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Fetch PR info for workflow_dispatch
@@ -423,6 +426,7 @@ jobs:
           pr-title: ${{ steps.pr-info.outputs.pr_title || steps.pr-info-dispatch.outputs.pr_title }}
           mode: ${{ github.event_name == 'repository_dispatch' && 'regenerate' || 'new' }}
           comment-id: ${{ needs.post-processing-comment.outputs.comment-id }}
+          auto-approve: ${{ steps.config.outputs.auto_approve }}
 
   regenerate-catchup:
     if: >-

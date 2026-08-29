@@ -53,6 +53,10 @@ inputs:
     description: "Pre-posted processing comment ID (from post-processing-comment job)"
     required: false
     default: ""
+  auto-approve:
+    description: "Enable auto-approve mode (record mapping immediately without user action)"
+    required: false
+    default: "false"
 
 runs:
   using: "composite"
@@ -253,6 +257,7 @@ runs:
         EXISTING_SOURCE: ${{ steps.extract-existing.outputs.source }}
         EXISTING_AI_COMPONENTS: ${{ steps.extract-existing.outputs.ai_components }}
         EXISTING_NO_IMPACT: ${{ steps.extract-existing.outputs.no_impact }}
+        AUTO_APPROVE: ${{ inputs.auto-approve }}
       run: |
         set -euo pipefail
 
@@ -299,9 +304,15 @@ runs:
           fi
         else
           # 新規: LLM抽出結果を使用
+          should_auto_record="false"
           if [ "$AI_OUTCOME" = "success" ] && [ "$AI_SKIPPED" != "true" ] && [ -n "$AI_COMPONENTS" ] && [ "$AI_COMPONENTS" != "[]" ]; then
             extra_args=(--ai-components "$AI_COMPONENTS")
             echo "🤖 AI extraction succeeded (provider: ${AI_PROVIDER}), posting AI proposal comment"
+            if [ "$AUTO_APPROVE" = "true" ]; then
+              extra_args+=(--auto-approve)
+              should_auto_record="true"
+              echo "🤖 Auto-approve mode: will auto-record after posting"
+            fi
           else
             if [ "$AI_OUTCOME" != "success" ]; then
               echo "⚠️ AI extraction failed, falling back to manual mapping comment"
@@ -311,6 +322,11 @@ runs:
               echo "🤖 AI extraction succeeded but found no matching components (provider: ${AI_PROVIDER})"
               extra_args=(--no-impact-default)
               ai_notice=$'\n\n> ℹ️ AI抽出の結果、影響コンポーネントは検出されませんでした。該当がある場合は手動で選択してください。'
+              if [ "$AUTO_APPROVE" = "true" ]; then
+                extra_args+=(--auto-approve)
+                should_auto_record="true"
+                echo "🤖 Auto-approve mode: will auto-record no_impact after posting"
+              fi
             else
               echo "📝 No AI extraction available, posting manual mapping comment"
             fi
@@ -343,6 +359,7 @@ runs:
 
         rm -f "$components_file"
         echo "comment_file=${comment_file}" >> "$GITHUB_OUTPUT"
+        echo "should_auto_record=${should_auto_record:-false}" >> "$GITHUB_OUTPUT"
 
     - name: Post or update comment with result
       if: steps.check.outputs.already_posted != 'true'
@@ -367,8 +384,143 @@ runs:
         rm -f "$COMMENT_FILE"
         echo "✅ Architecture tracking comment posted successfully"
 
+    - name: Auto-record mapping
+      id: auto-record
+      if: >-
+        steps.check.outputs.already_posted != 'true'
+        && steps.build.outputs.should_auto_record == 'true'
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        DATA_BRANCH: ${{ inputs.data-branch }}
+        PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
+        PR_TITLE: ${{ inputs.pr-title || github.event.pull_request.title }}
+        AI_COMPONENTS: ${{ steps.extract.outputs.components }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+
+        RECORD_MAPPING_DIR="${ACTION_PATH}/../record-mapping"
+
+        # PR情報を取得
+        pr_json=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
+          --jq '{url: .html_url, merged_at: .merged_at, author: .user.login, additions: .additions, deletions: .deletions, changed_files: .changed_files, labels: [.labels[].name]}')
+
+        PR_URL=$(echo "$pr_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['url'])")
+        MERGED_AT=$(echo "$pr_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['merged_at'] or '')")
+        AUTHOR=$(echo "$pr_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['author'])")
+        ADDITIONS=$(echo "$pr_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['additions'])")
+        DELETIONS=$(echo "$pr_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['deletions'])")
+        CHANGED_FILES=$(echo "$pr_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['changed_files'])")
+        LABELS=$(echo "$pr_json" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin)['labels']))")
+
+        # merged_atが空の場合（未マージ）は現在時刻を使用
+        if [ -z "$MERGED_AT" ] || [ "$MERGED_AT" = "None" ]; then
+          MERGED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        fi
+
+        # AI抽出結果からコンポーネントとno_impactを判定
+        no_impact_args=()
+        if [ -n "$AI_COMPONENTS" ] && [ "$AI_COMPONENTS" != "[]" ]; then
+          COMPONENTS="$AI_COMPONENTS"
+        else
+          COMPONENTS="[]"
+          no_impact_args=(--no-impact)
+        fi
+
+        max_retries=3
+        retry=0
+
+        while [ $retry -lt $max_retries ]; do
+          work_dir=$(mktemp -d)
+          git clone --branch "${DATA_BRANCH}" --single-branch \
+            "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$work_dir"
+
+          model_version=$(cd "${RECORD_MAPPING_DIR}" && python3 -c "from update_data import read_model_version; print(read_model_version('${work_dir}/components.yaml'))" 2>/dev/null || echo "")
+
+          model_version_args=()
+          if [ -n "$model_version" ]; then
+            model_version_args=(--model-version "$model_version")
+          fi
+
+          diff_stats_args=()
+          if [ -n "$ADDITIONS" ] && [ -n "$DELETIONS" ] && [ -n "$CHANGED_FILES" ]; then
+            diff_stats_args=(--additions "$ADDITIONS" --deletions "$DELETIONS" --changed-files "$CHANGED_FILES")
+          fi
+
+          labels_args=()
+          if [ -n "$LABELS" ] && [ "$LABELS" != "[]" ]; then
+            labels_args=(--labels "$LABELS")
+          fi
+
+          python3 "${RECORD_MAPPING_DIR}/update_data.py" \
+            --mappings-file "${work_dir}/mappings.json" \
+            --timeline-file "${work_dir}/timeline.json" \
+            --pr-number "$PR_NUMBER" \
+            --pr-title "$PR_TITLE" \
+            --pr-url "$PR_URL" \
+            --merged-at "$MERGED_AT" \
+            --components "$COMPONENTS" \
+            --author "$AUTHOR" \
+            --source "ai" \
+            --ai-components "$AI_COMPONENTS" \
+            --auto-approved \
+            "${no_impact_args[@]}" \
+            "${model_version_args[@]}" \
+            "${diff_stats_args[@]}" \
+            "${labels_args[@]}"
+
+          cd "$work_dir"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mappings.json timeline.json
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            rm -rf "$work_dir"
+            exit 0
+          fi
+
+          git commit -m "Auto-approve mapping for PR #${PR_NUMBER}"
+
+          if git push origin "${DATA_BRANCH}"; then
+            echo "✅ Auto-approved mapping recorded for PR #${PR_NUMBER}"
+            rm -rf "$work_dir"
+            exit 0
+          fi
+
+          echo "⚠️ Push failed (attempt $((retry + 1))/${max_retries}), retrying..."
+          retry=$((retry + 1))
+          cd /tmp
+          rm -rf "$work_dir"
+          sleep $((retry * 2))
+        done
+
+        echo "::error::Failed to push auto-approved mapping after ${max_retries} retries"
+        exit 1
+
+    - name: Warn auto-record failure
+      if: >-
+        steps.auto-record.outcome == 'failure'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
+      run: |
+        set -euo pipefail
+        gh pr comment "$PR_NUMBER" \
+          --repo "$REPO" \
+          --body "⚠️ **Architecture Tracker**: 自動記録に失敗しました。トラッキングIssueを作成します。PRコメントのチェックボックスで手動選択してください。"
+
     - name: Create tracking issue
-      if: steps.check.outputs.already_posted != 'true' && inputs.mode != 'regenerate'
+      if: >-
+        steps.check.outputs.already_posted != 'true'
+        && inputs.mode != 'regenerate'
+        && (steps.build.outputs.should_auto_record != 'true'
+            || steps.auto-record.outcome == 'failure')
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}

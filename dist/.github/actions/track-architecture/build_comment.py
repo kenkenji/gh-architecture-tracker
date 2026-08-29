@@ -60,6 +60,11 @@ def parse_args():
         action="store_true",
         help="Pre-check the no-impact checkbox (for regeneration)",
     )
+    parser.add_argument(
+        "--auto-approve",
+        action="store_true",
+        help="Enable auto-approve mode (record mapping immediately without user action)",
+    )
     return parser.parse_args()
 
 
@@ -192,11 +197,13 @@ def build_editor_link_section(spa_url, pr_number=""):
 
 def build_comment(pr_number, pr_title, data, source="manual", ai_component_ids=None,
                   no_impact_default=False, proposals=None, detection_method="",
-                  spa_url="", checked_ids=None):
+                  spa_url="", checked_ids=None, auto_approve=False):
     checkbox_section = build_checkbox_section(data, ai_component_ids,
                                               checked_ids=checked_ids)
 
-    if source == "ai":
+    if auto_approve and source == "ai":
+        intro = "✅ 自動承認モードにより自動記録されました。必要に応じてチェックボックスを修正してください（修正内容は自動的に反映されます）。"
+    elif source == "ai":
         intro = "AIがこのPRの影響コンポーネントを提案しました（✅ = AI提案済み）。必要に応じて修正してください。"
     else:
         intro = "このPRが影響したコンポーネントを選択してください。"
@@ -204,6 +211,10 @@ def build_comment(pr_number, pr_title, data, source="manual", ai_component_ids=N
     ai_marker = ""
     if source == "ai" and ai_component_ids:
         ai_marker = f"\n<!-- ai-components: {json.dumps(ai_component_ids, ensure_ascii=False)} -->"
+
+    auto_approve_marker = ""
+    if auto_approve:
+        auto_approve_marker = "\n<!-- auto-approved: true -->"
 
     proposals_markers = ""
     if proposals:
@@ -224,7 +235,7 @@ def build_comment(pr_number, pr_title, data, source="manual", ai_component_ids=N
     return f"""\
 ## 🏗 Architecture Tracker
 
-<!-- source: {source} -->{ai_marker}{proposals_markers}
+<!-- source: {source} -->{ai_marker}{auto_approve_marker}{proposals_markers}
 
 **PR #{pr_number}**: {escape_markdown(pr_title)}
 
@@ -268,7 +279,8 @@ def main():
                         ai_component_ids=ai_ids, no_impact_default=no_impact,
                         proposals=proposals, detection_method=args.detection_method,
                         spa_url=args.spa_url,
-                        checked_ids=checked_ids))
+                        checked_ids=checked_ids,
+                        auto_approve=args.auto_approve))
 
 
 if __name__ == "__main__":

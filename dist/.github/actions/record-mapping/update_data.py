@@ -37,13 +37,14 @@ def parse_args():
     parser.add_argument("--deletions", type=int, default=None, help="Number of deleted lines")
     parser.add_argument("--changed-files", type=int, default=None, help="Number of changed files")
     parser.add_argument("--labels", default=None, help="JSON array of label names")
+    parser.add_argument("--auto-approved", action="store_true", help="Mark as auto-approved by auto_approve mode")
     return parser.parse_args()
 
 
 def update_mappings(data, pr_number, pr_title, pr_url, merged_at, components,
                     author, timestamp, source="manual", ai_components=None,
                     no_impact=False, model_version=None,
-                    diff_stats=None, labels=None):
+                    diff_stats=None, labels=None, auto_approved=False):
     if components and no_impact:
         no_impact = False
     entry = {
@@ -66,13 +67,16 @@ def update_mappings(data, pr_number, pr_title, pr_url, merged_at, components,
         entry["diff_stats"] = diff_stats
     if labels is not None:
         entry["labels"] = labels
+    if auto_approved:
+        entry["auto_approved"] = True
     data["mappings"][str(pr_number)] = entry
     return data
 
 
 def update_timeline(data, pr_number, pr_title, pr_url, components,
                     author, timestamp, source="manual", ai_components=None,
-                    no_impact=False, diff_stats=None, labels=None):
+                    no_impact=False, diff_stats=None, labels=None,
+                    auto_approved=False):
     if components and no_impact:
         no_impact = False
     compact = timestamp.replace("-", "").replace(":", "").replace(".", "")
@@ -96,6 +100,8 @@ def update_timeline(data, pr_number, pr_title, pr_url, components,
         entry["diff_stats"] = diff_stats
     if labels is not None:
         entry["labels"] = labels
+    if auto_approved:
+        entry["auto_approved"] = True
 
     data["entries"].insert(0, entry)
     return data
@@ -128,12 +134,14 @@ def main():
         source=args.source, ai_components=ai_components,
         no_impact=args.no_impact, model_version=args.model_version,
         diff_stats=diff_stats, labels=labels,
+        auto_approved=args.auto_approved,
     )
     timeline_data = update_timeline(
         timeline_data, args.pr_number, args.pr_title, args.pr_url,
         components, args.author, now,
         source=args.source, ai_components=ai_components,
         no_impact=args.no_impact, diff_stats=diff_stats, labels=labels,
+        auto_approved=args.auto_approved,
     )
 
     with open(args.mappings_file, "w", encoding="utf-8") as f:

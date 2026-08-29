@@ -177,6 +177,7 @@ spa:
   url: https://${owner}.github.io/${repo_name}
 llm:
   model: claude-sonnet-5
+auto_approve: false
 YAML
 
   echo '{"version":"1.0","mappings":{}}' > "${work_dir}/mappings.json"
