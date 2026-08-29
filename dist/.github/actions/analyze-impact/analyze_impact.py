@@ -11,134 +11,14 @@ Issueの内容とアーキテクチャモデルから影響範囲を分析し、
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
-import time
 
 import yaml
 
-DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
-DEFAULT_OPENAI_MODEL = "gpt-4o"
-
-
-def detect_provider():
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return "anthropic"
-    if os.environ.get("OPENAI_API_KEY"):
-        return "openai"
-    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
-        return "claude-code"
-    return None
-
-
-def call_anthropic(prompt, model=None, max_retries=2):
-    import anthropic
-
-    model = model or DEFAULT_ANTHROPIC_MODEL
-    client = anthropic.Anthropic(timeout=120.0)
-    for attempt in range(max_retries + 1):
-        try:
-            response = client.messages.create(
-                model=model,
-                max_tokens=4096,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return response.content[0].text
-        except anthropic.RateLimitError:
-            if attempt < max_retries:
-                wait = 2 ** (attempt + 1)
-                print(f"Rate limited, retrying in {wait}s...", file=sys.stderr)
-                time.sleep(wait)
-            else:
-                raise
-        except anthropic.APITimeoutError:
-            if attempt < max_retries:
-                wait = 2 ** (attempt + 1)
-                print(f"Timeout, retrying in {wait}s...", file=sys.stderr)
-                time.sleep(wait)
-            else:
-                raise
-
-
-def call_openai(prompt, model=None, max_retries=2):
-    import openai
-
-    model = model or DEFAULT_OPENAI_MODEL
-    client = openai.OpenAI(timeout=120.0)
-    for attempt in range(max_retries + 1):
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                max_tokens=4096,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return response.choices[0].message.content
-        except openai.RateLimitError:
-            if attempt < max_retries:
-                wait = 2 ** (attempt + 1)
-                print(f"Rate limited, retrying in {wait}s...", file=sys.stderr)
-                time.sleep(wait)
-            else:
-                raise
-        except openai.APITimeoutError:
-            if attempt < max_retries:
-                wait = 2 ** (attempt + 1)
-                print(f"Timeout, retrying in {wait}s...", file=sys.stderr)
-                time.sleep(wait)
-            else:
-                raise
-
-
-def call_claude_code(prompt, model=None, max_retries=2):
-    model = model or DEFAULT_ANTHROPIC_MODEL
-    cmd = ["claude", "-p", prompt, "--output-format", "text", "--model", model]
-
-    for attempt in range(max_retries + 1):
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=180,
-            )
-            if result.returncode != 0:
-                if attempt < max_retries:
-                    wait = 2 ** (attempt + 1)
-                    print(
-                        f"CLI exited with code {result.returncode}, retrying in {wait}s...",
-                        file=sys.stderr,
-                    )
-                    time.sleep(wait)
-                    continue
-                raise RuntimeError(
-                    f"claude CLI exited with code {result.returncode}: {result.stderr.strip()}"
-                )
-            return result.stdout.strip()
-        except subprocess.TimeoutExpired:
-            if attempt < max_retries:
-                wait = 2 ** (attempt + 1)
-                print(f"CLI timeout, retrying in {wait}s...", file=sys.stderr)
-                time.sleep(wait)
-            else:
-                raise RuntimeError("claude CLI timed out after all retries")
-
-
-def parse_llm_response(response_text):
-    text = response_text.strip()
-    depth = 0
-    start = -1
-    for i, ch in enumerate(text):
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0 and start >= 0:
-                try:
-                    return json.loads(text[start : i + 1])
-                except json.JSONDecodeError:
-                    start = -1
-    return json.loads(text)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'shared'))
+from llm_utils import call_llm, detect_provider, parse_llm_response
 
 
 def format_components_for_prompt(components_data):
@@ -541,12 +421,7 @@ def main():
 
     try:
         model = args.model or None
-        if provider == "anthropic":
-            raw_response = call_anthropic(prompt, model)
-        elif provider == "openai":
-            raw_response = call_openai(prompt, model)
-        else:
-            raw_response = call_claude_code(prompt, model)
+        raw_response = call_llm(provider, prompt, model, max_tokens=4096, timeout=120)
 
         analysis = parse_llm_response(raw_response)
 

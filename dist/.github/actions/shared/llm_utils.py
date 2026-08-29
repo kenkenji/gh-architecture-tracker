@@ -1,7 +1,7 @@
 """
 LLM API呼び出しの共通ユーティリティ。
 
-extract_components.py と detect_changes.py で共有する関数群。
+extract_components.py、detect_changes.py、analyze_impact.py で共有する関数群。
 """
 
 import json
@@ -26,12 +26,12 @@ def detect_provider():
     return None
 
 
-def call_anthropic(prompt, model=None, max_tokens=1024, max_retries=2):
+def call_anthropic(prompt, model=None, max_tokens=1024, max_retries=2, timeout=60.0):
     """Anthropic Claude APIを呼び出す。レート制限時にリトライする。"""
     import anthropic
 
     model = model or DEFAULT_ANTHROPIC_MODEL
-    client = anthropic.Anthropic(timeout=60.0)
+    client = anthropic.Anthropic(timeout=timeout)
     for attempt in range(max_retries + 1):
         try:
             response = client.messages.create(
@@ -56,12 +56,12 @@ def call_anthropic(prompt, model=None, max_tokens=1024, max_retries=2):
                 raise
 
 
-def call_openai(prompt, model=None, max_tokens=1024, max_retries=2):
+def call_openai(prompt, model=None, max_tokens=1024, max_retries=2, timeout=60.0):
     """OpenAI APIを呼び出す。レート制限時にリトライする。"""
     import openai
 
     model = model or DEFAULT_OPENAI_MODEL
-    client = openai.OpenAI(timeout=60.0)
+    client = openai.OpenAI(timeout=timeout)
     for attempt in range(max_retries + 1):
         try:
             response = client.chat.completions.create(
@@ -86,7 +86,7 @@ def call_openai(prompt, model=None, max_tokens=1024, max_retries=2):
                 raise
 
 
-def call_claude_code(prompt, model=None, max_retries=2):
+def call_claude_code(prompt, model=None, max_retries=2, timeout=120):
     """Claude Code CLIを呼び出す。CLAUDE_CODE_OAUTH_TOKENで認証する。"""
     model = model or DEFAULT_ANTHROPIC_MODEL
     cmd = ["claude", "-p", prompt, "--output-format", "text", "--model", model]
@@ -97,7 +97,7 @@ def call_claude_code(prompt, model=None, max_retries=2):
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=timeout,
             )
             if result.returncode != 0:
                 if attempt < max_retries:
@@ -136,18 +136,24 @@ def parse_llm_response(response_text):
     return json.loads(text)
 
 
-def call_llm(provider, prompt, model=None, max_tokens=1024):
-    """プロバイダーに応じたLLM APIを呼び出す。"""
+def call_llm(provider, prompt, model=None, max_tokens=1024, timeout=None):
+    """プロバイダーに応じたLLM APIを呼び出す。
+    max_tokensはclaude-codeプロバイダーでは無視される（CLIに該当フラグなし）。
+    timeoutを指定すると各プロバイダーのデフォルト値を上書きする。"""
     if provider == "anthropic":
-        return call_anthropic(prompt, model, max_tokens=max_tokens)
+        kwargs = {"max_tokens": max_tokens}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return call_anthropic(prompt, model, **kwargs)
     elif provider == "openai":
-        return call_openai(prompt, model, max_tokens=max_tokens)
+        kwargs = {"max_tokens": max_tokens}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return call_openai(prompt, model, **kwargs)
     elif provider == "claude-code":
-        if max_tokens != 1024:
-            print(
-                f"Warning: max_tokens={max_tokens} is ignored for claude-code provider (CLI has no --max-tokens flag)",
-                file=sys.stderr,
-            )
-        return call_claude_code(prompt, model)
+        kwargs = {}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return call_claude_code(prompt, model, **kwargs)
     else:
         raise ValueError(f"Unknown provider: {provider}")
