@@ -9,15 +9,13 @@ import fnmatch
 import json
 import os
 import re
-import subprocess
 import sys
-import time
 import traceback
 
 import yaml
 
-DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
-DEFAULT_OPENAI_MODEL = "gpt-4o"
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'shared'))
+from llm_utils import detect_provider, call_llm, parse_llm_response
 
 SKIP_PATTERNS = [
     "docs/**",
@@ -45,115 +43,6 @@ def is_doc_or_test_only(files):
 
 def get_existing_ids(components_data):
     return {c.get("id") for c in components_data.get("components", []) if c.get("id")}
-
-
-def detect_provider():
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return "anthropic"
-    if os.environ.get("OPENAI_API_KEY"):
-        return "openai"
-    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
-        return "claude-code"
-    return None
-
-
-def call_anthropic(prompt, model=None, max_retries=2):
-    import anthropic
-
-    model = model or DEFAULT_ANTHROPIC_MODEL
-    client = anthropic.Anthropic(timeout=60.0)
-    for attempt in range(max_retries + 1):
-        try:
-            response = client.messages.create(
-                model=model,
-                max_tokens=2048,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return response.content[0].text
-        except anthropic.RateLimitError:
-            if attempt < max_retries:
-                wait = 2 ** (attempt + 1)
-                print(f"Rate limited, retrying in {wait}s...", file=sys.stderr)
-                time.sleep(wait)
-            else:
-                raise
-        except anthropic.APITimeoutError:
-            if attempt < max_retries:
-                wait = 2 ** (attempt + 1)
-                print(f"Timeout, retrying in {wait}s...", file=sys.stderr)
-                time.sleep(wait)
-            else:
-                raise
-
-
-def call_openai(prompt, model=None, max_retries=2):
-    import openai
-
-    model = model or DEFAULT_OPENAI_MODEL
-    client = openai.OpenAI(timeout=60.0)
-    for attempt in range(max_retries + 1):
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                max_tokens=2048,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return response.choices[0].message.content
-        except openai.RateLimitError:
-            if attempt < max_retries:
-                wait = 2 ** (attempt + 1)
-                print(f"Rate limited, retrying in {wait}s...", file=sys.stderr)
-                time.sleep(wait)
-            else:
-                raise
-        except openai.APITimeoutError:
-            if attempt < max_retries:
-                wait = 2 ** (attempt + 1)
-                print(f"Timeout, retrying in {wait}s...", file=sys.stderr)
-                time.sleep(wait)
-            else:
-                raise
-
-
-def call_claude_code(prompt, model=None, max_retries=2):
-    model = model or DEFAULT_ANTHROPIC_MODEL
-    cmd = ["claude", "-p", prompt, "--output-format", "text", "--model", model]
-
-    for attempt in range(max_retries + 1):
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=120,
-            )
-            if result.returncode != 0:
-                if attempt < max_retries:
-                    wait = 2 ** (attempt + 1)
-                    print(f"CLI exited with code {result.returncode}, retrying in {wait}s...",
-                          file=sys.stderr)
-                    time.sleep(wait)
-                    continue
-                raise RuntimeError(
-                    f"claude CLI exited with code {result.returncode}: {result.stderr.strip()}")
-            return result.stdout.strip()
-        except subprocess.TimeoutExpired:
-            if attempt < max_retries:
-                wait = 2 ** (attempt + 1)
-                print(f"CLI timeout, retrying in {wait}s...", file=sys.stderr)
-                time.sleep(wait)
-            else:
-                raise RuntimeError("claude CLI timed out after all retries")
-
-
-def parse_llm_response(response_text):
-    """raw_decode()で最初のJSONオブジェクトのみをパースし、後続データは無視する。"""
-    text = response_text.strip()
-
-    decoder = json.JSONDecoder()
-    idx = text.find("{")
-    if idx != -1:
-        result, _ = decoder.raw_decode(text, idx)
-        return result
-
-    return json.loads(text)
 
 
 def sanitize_string(value, max_length=200):
@@ -321,12 +210,7 @@ def main():
                 model = args.model or None
 
                 try:
-                    if provider == "anthropic":
-                        raw = call_anthropic(prompt, model)
-                    elif provider == "openai":
-                        raw = call_openai(prompt, model)
-                    else:
-                        raw = call_claude_code(prompt, model)
+                    raw = call_llm(provider, prompt, model, max_tokens=2048)
 
                     llm_result = parse_llm_response(raw)
                     existing_ids = get_existing_ids(components_data)
