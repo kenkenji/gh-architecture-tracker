@@ -38,9 +38,12 @@ runs:
         fi
 
         # データブランチをクローン
+        GIT_AUTH_HEADER="AUTHORIZATION: basic $(echo -n "x-access-token:${GH_TOKEN}" | base64 | tr -d '\n')"
+        echo "::add-mask::${GIT_AUTH_HEADER}"
         work_dir=$(mktemp -d)
-        git clone --branch "${DATA_BRANCH}" --single-branch \
-          "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$work_dir"
+        git -c "http.https://github.com/.extraheader=${GIT_AUTH_HEADER}" \
+          clone --branch "${DATA_BRANCH}" --single-branch \
+          "https://github.com/${REPO}.git" "$work_dir"
 
         comment_file=$(mktemp --suffix=.md)
 

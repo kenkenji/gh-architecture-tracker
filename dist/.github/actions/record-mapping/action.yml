@@ -123,11 +123,16 @@ runs:
           ai_args+=(--no-impact)
         fi
 
+        GIT_AUTH_HEADER="AUTHORIZATION: basic $(echo -n "x-access-token:${GH_TOKEN}" | base64 | tr -d '\n')"
+        echo "::add-mask::${GIT_AUTH_HEADER}"
+
         while [ $retry -lt $max_retries ]; do
           # データブランチをクローン
           work_dir=$(mktemp -d)
-          git clone --branch "${DATA_BRANCH}" --single-branch \
-            "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$work_dir"
+          git -c "http.https://github.com/.extraheader=${GIT_AUTH_HEADER}" \
+            clone --branch "${DATA_BRANCH}" --single-branch \
+            "https://github.com/${REPO}.git" "$work_dir"
+          git -C "$work_dir" config --local "http.https://github.com/.extraheader" "${GIT_AUTH_HEADER}"
 
           # components.yamlから現在のモデルバージョンを取得
           model_version=$(cd "${ACTION_PATH}" && python3 -c "from update_data import read_model_version; print(read_model_version('${work_dir}/components.yaml'))" 2>/dev/null || echo "")

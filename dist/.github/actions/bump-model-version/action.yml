@@ -72,10 +72,15 @@ runs:
           trigger_args+=(--trigger-pr-url "$TRIGGER_PR_URL")
         fi
 
+        GIT_AUTH_HEADER="AUTHORIZATION: basic $(echo -n "x-access-token:${GH_TOKEN}" | base64 | tr -d '\n')"
+        echo "::add-mask::${GIT_AUTH_HEADER}"
+
         while [ $retry -lt $max_retries ]; do
           work_dir=$(mktemp -d)
-          git clone --branch "${DATA_BRANCH}" --single-branch \
-            "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$work_dir"
+          git -c "http.https://github.com/.extraheader=${GIT_AUTH_HEADER}" \
+            clone --branch "${DATA_BRANCH}" --single-branch \
+            "https://github.com/${REPO}.git" "$work_dir"
+          git -C "$work_dir" config --local "http.https://github.com/.extraheader" "${GIT_AUTH_HEADER}"
 
           output=$(python3 "${ACTION_PATH}/bump_version.py" \
             --components-file "${work_dir}/components.yaml" \

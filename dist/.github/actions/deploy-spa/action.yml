@@ -59,11 +59,15 @@ runs:
         fi
 
         work_dir=$(mktemp -d)
-        repo_url="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+        repo_url="https://github.com/${REPO}.git"
+        GIT_AUTH_HEADER="AUTHORIZATION: basic $(echo -n "x-access-token:${GH_TOKEN}" | base64 | tr -d '\n')"
+        echo "::add-mask::${GIT_AUTH_HEADER}"
 
         # gh-pagesブランチの存在確認
-        if git ls-remote --heads "$repo_url" gh-pages | grep -q gh-pages; then
-          git clone --branch gh-pages --single-branch "$repo_url" "$work_dir"
+        if git -c "http.https://github.com/.extraheader=${GIT_AUTH_HEADER}" \
+          ls-remote --heads "$repo_url" gh-pages | grep -q gh-pages; then
+          git -c "http.https://github.com/.extraheader=${GIT_AUTH_HEADER}" \
+            clone --branch gh-pages --single-branch "$repo_url" "$work_dir"
         else
           # gh-pagesブランチが存在しない場合は新規作成（orphanブランチ）
           git init "$work_dir"
@@ -72,6 +76,7 @@ runs:
           git remote add origin "$repo_url"
           cd - > /dev/null
         fi
+        git -C "$work_dir" config --local "http.https://github.com/.extraheader" "${GIT_AUTH_HEADER}"
 
         # 既存ファイルを削除してビルド成果物をコピー
         find "$work_dir" -mindepth 1 -maxdepth 1 -not -name '.git' -exec rm -rf {} +
