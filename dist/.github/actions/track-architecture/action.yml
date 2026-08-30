@@ -520,6 +520,16 @@ runs:
           --repo "$REPO" \
           --body "⚠️ **Architecture Tracker**: 自動記録に失敗しました。トラッキングIssueを作成します。PRコメントのチェックボックスで手動選択してください。"
 
+    - name: Generate Mermaid diagram (auto-record)
+      if: >-
+        steps.build.outputs.should_auto_record == 'true'
+        && steps.auto-record.outcome == 'success'
+      uses: ./.github/actions/generate-mermaid
+      with:
+        github-token: ${{ inputs.github-token }}
+        data-branch: ${{ inputs.data-branch }}
+        pr-number: ${{ inputs.pr-number || github.event.pull_request.number }}
+
     - name: Create tracking issue
       if: >-
         steps.check.outputs.already_posted != 'true'
