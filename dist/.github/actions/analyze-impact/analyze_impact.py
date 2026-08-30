@@ -421,7 +421,7 @@ def main():
 
     try:
         model = args.model or None
-        raw_response = call_llm(provider, prompt, model, max_tokens=4096, timeout=120)
+        raw_response = call_llm(provider, prompt, model, max_tokens=4096)
 
         analysis = parse_llm_response(raw_response)
 

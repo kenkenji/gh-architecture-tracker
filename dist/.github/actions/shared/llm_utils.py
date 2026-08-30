@@ -86,10 +86,10 @@ def call_openai(prompt, model=None, max_tokens=1024, max_retries=2, timeout=60.0
                 raise
 
 
-def call_claude_code(prompt, model=None, max_retries=2, timeout=120):
+def call_claude_code(prompt, model=None, max_retries=2, timeout=300):
     """Claude Code CLIを呼び出す。CLAUDE_CODE_OAUTH_TOKENで認証する。"""
     model = model or DEFAULT_ANTHROPIC_MODEL
-    cmd = ["claude", "-p", prompt, "--output-format", "text", "--model", model]
+    cmd = ["claude", "-p", prompt, "--output-format", "text", "--model", model, "--max-turns", "1"]
 
     for attempt in range(max_retries + 1):
         try:
