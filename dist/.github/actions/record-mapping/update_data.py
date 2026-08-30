@@ -73,12 +73,27 @@ def update_mappings(data, pr_number, pr_title, pr_url, merged_at, components,
     return data
 
 
+def _is_duplicate_timeline_entry(entries, pr_number, components, source):
+    """同一PRの直近エントリとcomponents+sourceが一致するか判定する。"""
+    for entry in entries:
+        if entry.get("pr_number") == pr_number:
+            if entry.get("source") == source and sorted(entry.get("components") or []) == sorted(components):
+                return True
+            return False
+    return False
+
+
 def update_timeline(data, pr_number, pr_title, pr_url, components,
                     author, timestamp, source="manual", ai_components=None,
                     no_impact=False, diff_stats=None, labels=None,
                     auto_approved=False):
     if components and no_impact:
         no_impact = False
+
+    if _is_duplicate_timeline_entry(data.get("entries", []), pr_number, components, source):
+        print(f"Skipped duplicate timeline entry for PR #{pr_number}")
+        return data
+
     compact = timestamp.replace("-", "").replace(":", "").replace(".", "")
     entry_id = f"pr-{pr_number}-{compact}"
 
@@ -136,6 +151,7 @@ def main():
         diff_stats=diff_stats, labels=labels,
         auto_approved=args.auto_approved,
     )
+    entry_count_before = len(timeline_data.get("entries", []))
     timeline_data = update_timeline(
         timeline_data, args.pr_number, args.pr_title, args.pr_url,
         components, args.author, now,
@@ -143,6 +159,7 @@ def main():
         no_impact=args.no_impact, diff_stats=diff_stats, labels=labels,
         auto_approved=args.auto_approved,
     )
+    timeline_skipped = len(timeline_data["entries"]) == entry_count_before
 
     with open(args.mappings_file, "w", encoding="utf-8") as f:
         json.dump(mappings_data, f, indent=2, ensure_ascii=False)
@@ -152,7 +169,10 @@ def main():
         json.dump(timeline_data, f, indent=2, ensure_ascii=False)
         f.write("\n")
 
-    print(f"Updated mappings and timeline for PR #{args.pr_number}")
+    if timeline_skipped:
+        print(f"Updated mappings for PR #{args.pr_number} (timeline skipped: duplicate)")
+    else:
+        print(f"Updated mappings and timeline for PR #{args.pr_number}")
     print(f"Components: {components}")
 
 
