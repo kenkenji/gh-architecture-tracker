@@ -476,14 +476,6 @@ jobs:
           merged-at: ${{ steps.pr-info.outputs.merged_at }}
           author: ${{ steps.pr-info.outputs.author }}
 
-      - name: Regenerate Mermaid diagram
-        if: steps.catchup.outputs.recorded == 'true'
-        uses: ./.github/actions/generate-mermaid
-        with:
-          github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
-          data-branch: _architecture-tracker
-          pr-number: ${{ github.event.client_payload.pr_number }}
-
   merge-catchup:
     if: >-
       !failure() && !cancelled()
@@ -514,14 +506,6 @@ jobs:
           github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
           data-branch: _architecture-tracker
 
-      - name: Generate Mermaid diagrams
-        if: steps.catchup.outputs.recorded == 'true'
-        uses: ./.github/actions/generate-mermaid
-        with:
-          github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
-          data-branch: _architecture-tracker
-          pr-number: ${{ github.event.pull_request.number }}
-
   record-mapping:
     if: >-
       github.event_name == 'issue_comment'
@@ -551,12 +535,3 @@ jobs:
         with:
           github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
           data-branch: _architecture-tracker
-
-      - name: Generate Mermaid diagrams
-        if: steps.record.outputs.skipped != 'true'
-        uses: ./.github/actions/generate-mermaid
-        with:
-          github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
-          data-branch: _architecture-tracker
-          pr-number: ${{ github.event.issue.number }}
-

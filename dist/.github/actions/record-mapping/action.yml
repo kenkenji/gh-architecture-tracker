@@ -88,6 +88,7 @@ runs:
       run: echo "skipped=true" >> "$GITHUB_OUTPUT"
 
     - name: Update data branch
+      id: update
       if: steps.parse.outputs.skip != 'true' && steps.pr-info.outputs.skip != 'true'
       shell: bash
       env:
@@ -184,6 +185,7 @@ runs:
 
           if git push origin "${DATA_BRANCH}"; then
             echo "✅ Successfully updated data branch."
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
             rm -rf "$work_dir"
             exit 0
           fi
@@ -198,36 +200,18 @@ runs:
         echo "::error::Failed to push after ${max_retries} retries"
         exit 1
 
-    - name: Close tracking issue
-      if: steps.parse.outputs.skip != 'true' && steps.pr-info.outputs.skip != 'true'
+    - name: Notify post-record
+      if: steps.update.outputs.pushed == 'true'
+      continue-on-error: true
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
         REPO: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.issue.number }}
-        NO_IMPACT: ${{ steps.parse.outputs.no_impact }}
       run: |
         set -euo pipefail
-
-        # PR番号に対応するトラッキングIssueを検索
-        issue_number=$(gh issue list \
-          --label "architecture-tracking" \
-          --state open \
-          --limit 1000 \
-          --json number,title \
-          --jq "[.[] | select(.title | test(\"PR #$PR_NUMBER —\"))] | .[0].number" \
-          --repo "$REPO")
-
-        if [ -n "$issue_number" ] && [ "$issue_number" != "null" ]; then
-          if [ "$NO_IMPACT" = "true" ]; then
-            close_comment="✅ PR #${PR_NUMBER} はアーキテクチャへの影響なしと記録されました。"
-          else
-            close_comment="✅ PR #${PR_NUMBER} のコンポーネント紐付けが完了しました。"
-          fi
-          gh issue close "$issue_number" \
-            --comment "$close_comment" \
-            --repo "$REPO"
-          echo "✅ Closed tracking issue #${issue_number}"
-        else
-          echo "ℹ️ No open tracking issue found for PR #${PR_NUMBER}"
-        fi
+        gh api "repos/${REPO}/dispatches" \
+          --method POST \
+          -f event_type=post-record \
+          -f "client_payload[pr_number]=${PR_NUMBER}"
+        echo "📤 Dispatched post-record for PR #${PR_NUMBER}"

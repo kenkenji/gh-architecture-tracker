@@ -492,6 +492,7 @@ runs:
 
           if git push origin "${DATA_BRANCH}"; then
             echo "✅ Auto-approved mapping recorded for PR #${PR_NUMBER}"
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
             rm -rf "$work_dir"
             exit 0
           fi
@@ -506,6 +507,24 @@ runs:
         echo "::error::Failed to push auto-approved mapping after ${max_retries} retries"
         exit 1
 
+    - name: Notify post-record (auto-record)
+      if: >-
+        steps.build.outputs.should_auto_record == 'true'
+        && steps.auto-record.outputs.pushed == 'true'
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
+      run: |
+        set -euo pipefail
+        gh api "repos/${REPO}/dispatches" \
+          --method POST \
+          -f event_type=post-record \
+          -f "client_payload[pr_number]=${PR_NUMBER}"
+        echo "📤 Dispatched post-record for PR #${PR_NUMBER}"
+
     - name: Warn auto-record failure
       if: >-
         steps.auto-record.outcome == 'failure'
@@ -519,16 +538,6 @@ runs:
         gh pr comment "$PR_NUMBER" \
           --repo "$REPO" \
           --body "⚠️ **Architecture Tracker**: 自動記録に失敗しました。トラッキングIssueを作成します。PRコメントのチェックボックスで手動選択してください。"
-
-    - name: Generate Mermaid diagram (auto-record)
-      if: >-
-        steps.build.outputs.should_auto_record == 'true'
-        && steps.auto-record.outcome == 'success'
-      uses: ./.github/actions/generate-mermaid
-      with:
-        github-token: ${{ inputs.github-token }}
-        data-branch: ${{ inputs.data-branch }}
-        pr-number: ${{ inputs.pr-number || github.event.pull_request.number }}
 
     - name: Create tracking issue
       if: >-
