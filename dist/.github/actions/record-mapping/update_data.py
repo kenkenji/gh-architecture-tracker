@@ -74,19 +74,36 @@ def update_mappings(data, pr_number, pr_title, pr_url, merged_at, components,
 
 
 def _is_duplicate_timeline_entry(entries, pr_number, components, source):
-    """同一PRの直近エントリとcomponents+sourceが一致するか判定する。"""
+    """同一PRのエントリにcomponents+sourceが一致するものがあるか判定する。"""
+    sorted_components = sorted(components)
     for entry in entries:
         if entry.get("pr_number") == pr_number:
-            if entry.get("source") == source and sorted(entry.get("components") or []) == sorted(components):
+            if entry.get("source") == source and sorted(entry.get("components") or []) == sorted_components:
                 return True
-            return False
     return False
+
+
+def _entry_sort_key(entry):
+    """エントリのソートキーを返す。merged_atがあればそちらを優先する。"""
+    return entry.get("merged_at") or entry.get("timestamp", "")
+
+
+def _find_insertion_index(entries, merged_at):
+    """merged_atを基準に降順を維持する挿入位置を二分探索で決定する。"""
+    lo, hi = 0, len(entries)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if _entry_sort_key(entries[mid]) >= merged_at:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
 
 
 def update_timeline(data, pr_number, pr_title, pr_url, components,
                     author, timestamp, source="manual", ai_components=None,
                     no_impact=False, diff_stats=None, labels=None,
-                    auto_approved=False):
+                    auto_approved=False, merged_at=None):
     if components and no_impact:
         no_impact = False
 
@@ -107,6 +124,8 @@ def update_timeline(data, pr_number, pr_title, pr_url, components,
         "source": source,
         "author": author,
     }
+    if merged_at is not None:
+        entry["merged_at"] = merged_at
     if ai_components is not None:
         entry["ai_components"] = ai_components
     if no_impact:
@@ -118,7 +137,11 @@ def update_timeline(data, pr_number, pr_title, pr_url, components,
     if auto_approved:
         entry["auto_approved"] = True
 
-    data["entries"].insert(0, entry)
+    if merged_at is not None:
+        idx = _find_insertion_index(data["entries"], merged_at)
+        data["entries"].insert(idx, entry)
+    else:
+        data["entries"].insert(0, entry)
     return data
 
 
@@ -158,6 +181,7 @@ def main():
         source=args.source, ai_components=ai_components,
         no_impact=args.no_impact, diff_stats=diff_stats, labels=labels,
         auto_approved=args.auto_approved,
+        merged_at=args.merged_at,
     )
     timeline_skipped = len(timeline_data["entries"]) == entry_count_before
 
