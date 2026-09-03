@@ -87,29 +87,33 @@ def call_openai(prompt, model=None, max_tokens=1024, max_retries=2, timeout=60.0
 
 
 def call_claude_code(prompt, model=None, max_retries=2, timeout=300):
-    """Claude Code CLIを呼び出す。CLAUDE_CODE_OAUTH_TOKENで認証する。"""
+    """Claude Code CLIを呼び出す。CLAUDE_CODE_OAUTH_TOKENで認証する。
+    プロンプトはstdin経由で渡す（コマンドライン引数長制限の回避）。"""
     model = model or DEFAULT_ANTHROPIC_MODEL
-    cmd = ["claude", "-p", prompt, "--output-format", "text", "--model", model, "--max-turns", "1"]
+    cmd = ["claude", "-p", "--output-format", "text", "--model", model, "--max-turns", "1"]
 
     for attempt in range(max_retries + 1):
         try:
             result = subprocess.run(
                 cmd,
+                input=prompt,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
             )
             if result.returncode != 0:
+                error_detail = result.stderr.strip() or result.stdout.strip()
                 if attempt < max_retries:
                     wait = 2 ** (attempt + 1)
                     print(
-                        f"CLI exited with code {result.returncode}, retrying in {wait}s...",
+                        f"CLI exited with code {result.returncode}, retrying in {wait}s...\n"
+                        f"  detail: {error_detail[:500]}",
                         file=sys.stderr,
                     )
                     time.sleep(wait)
                     continue
                 raise RuntimeError(
-                    f"claude CLI exited with code {result.returncode}: {result.stderr.strip()}"
+                    f"claude CLI exited with code {result.returncode}: {error_detail[:2000]}"
                 )
             return result.stdout.strip()
         except subprocess.TimeoutExpired:
