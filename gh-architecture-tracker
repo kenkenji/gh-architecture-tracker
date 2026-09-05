@@ -411,7 +411,8 @@ cmd_init() {
   mkdir -p "${root}/.github/workflows"
   cp "${DIST_DIR}/.github/workflows/architecture-tracker.yml" "${root}/.github/workflows/"
   cp "${DIST_DIR}/.github/workflows/impact-analysis.yml" "${root}/.github/workflows/"
-  ok ".github/workflows/architecture-tracker.yml, impact-analysis.yml"
+  cp "${DIST_DIR}/.github/workflows/catch-up.yml" "${root}/.github/workflows/"
+  ok ".github/workflows/architecture-tracker.yml, impact-analysis.yml, catch-up.yml"
 
   # 旧バージョンの init ワークフローが残っている場合は削除
   if [ -f "${root}/.github/workflows/architecture-tracker-init.yml" ]; then
@@ -420,7 +421,7 @@ cmd_init() {
   fi
 
   # .github/actions/
-  local actions=("track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa" "detect-model-changes" "bump-model-version" "analyze-impact")
+  local actions=("track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa" "detect-model-changes" "bump-model-version" "analyze-impact" "catch-up-bulk")
   local action_count=0
   for action in "${actions[@]}"; do
     if [ -d "${DIST_DIR}/.github/actions/${action}" ]; then
@@ -443,7 +444,7 @@ cmd_init() {
     info "変更をコミット・プッシュします..."
 
     cd "$root"
-    local add_targets=(.github/workflows/architecture-tracker.yml .github/workflows/impact-analysis.yml)
+    local add_targets=(.github/workflows/architecture-tracker.yml .github/workflows/impact-analysis.yml .github/workflows/catch-up.yml)
     for action in "${actions[@]}"; do
       if [ -d ".github/actions/${action}" ]; then
         add_targets+=(".github/actions/${action}")
@@ -575,7 +576,8 @@ cmd_update() {
   # ワークフロー
   cp "${DIST_DIR}/.github/workflows/architecture-tracker.yml" "${root}/.github/workflows/"
   cp "${DIST_DIR}/.github/workflows/impact-analysis.yml" "${root}/.github/workflows/"
-  ok ".github/workflows/architecture-tracker.yml, impact-analysis.yml"
+  cp "${DIST_DIR}/.github/workflows/catch-up.yml" "${root}/.github/workflows/"
+  ok ".github/workflows/architecture-tracker.yml, impact-analysis.yml, catch-up.yml"
 
   # 旧バージョンの init ワークフローが残っている場合は削除
   if [ -f "${root}/.github/workflows/architecture-tracker-init.yml" ]; then
@@ -584,7 +586,7 @@ cmd_update() {
   fi
 
   # Composite Actions
-  local actions=("track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa" "detect-model-changes" "bump-model-version" "analyze-impact")
+  local actions=("track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa" "detect-model-changes" "bump-model-version" "analyze-impact" "catch-up-bulk")
   for action in "${actions[@]}"; do
     if [ -d "${DIST_DIR}/.github/actions/${action}" ]; then
       mkdir -p "${root}/.github/actions/${action}"
@@ -597,7 +599,7 @@ cmd_update() {
     info "--no-push が指定されたため、コミット・プッシュはスキップします。"
   else
     cd "$root"
-    local add_targets=(.github/workflows/architecture-tracker.yml .github/workflows/impact-analysis.yml)
+    local add_targets=(.github/workflows/architecture-tracker.yml .github/workflows/impact-analysis.yml .github/workflows/catch-up.yml)
     for action in "${actions[@]}"; do
       if [ -d ".github/actions/${action}" ]; then
         add_targets+=(".github/actions/${action}")
@@ -652,6 +654,142 @@ Updated via gh-architecture-tracker CLI extension."
   fi
 }
 
+cmd_catch_up() {
+  local since="" until_date="" pr_numbers="" source_repo="" batch_size="10" dry_run=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --since)
+        if [[ -z "${2:-}" ]]; then error "--since には日付（YYYY-MM-DD）を指定してください"; exit 1; fi
+        since="$2"; shift 2 ;;
+      --until)
+        if [[ -z "${2:-}" ]]; then error "--until には日付（YYYY-MM-DD）を指定してください"; exit 1; fi
+        until_date="$2"; shift 2 ;;
+      --pr-numbers)
+        if [[ -z "${2:-}" ]]; then error "--pr-numbers にはPR番号（カンマ区切り）を指定してください"; exit 1; fi
+        pr_numbers="$2"; shift 2 ;;
+      --source)
+        if [[ -z "${2:-}" ]]; then error "--source にはリポジトリ（OWNER/REPO）を指定してください"; exit 1; fi
+        source_repo="$2"; shift 2 ;;
+      --batch-size)
+        if [[ -z "${2:-}" ]]; then error "--batch-size には数値を指定してください"; exit 1; fi
+        batch_size="$2"; shift 2 ;;
+      --dry-run) dry_run=true; shift ;;
+      --help|-h) usage_catch_up; exit 0 ;;
+      *) error "不明なオプション: $1"; usage_catch_up; exit 1 ;;
+    esac
+  done
+
+  # 日付フォーマットのバリデーション
+  if [[ -n "$since" ]] && ! [[ "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    error "--since の日付フォーマットが不正です（YYYY-MM-DD）: $since"
+    exit 1
+  fi
+  if [[ -n "$until_date" ]] && ! [[ "$until_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    error "--until の日付フォーマットが不正です（YYYY-MM-DD）: $until_date"
+    exit 1
+  fi
+
+  # PR番号のバリデーション
+  if [[ -n "$pr_numbers" ]]; then
+    local IFS=','
+    for num in $pr_numbers; do
+      num=$(echo "$num" | tr -d '[:space:]')
+      [[ -z "$num" ]] && continue
+      if ! [[ "$num" =~ ^[0-9]+$ ]]; then
+        error "--pr-numbers に無効な値が含まれています: '${num}'"
+        exit 1
+      fi
+    done
+    unset IFS
+  fi
+
+  # バッチサイズのバリデーション
+  if ! [[ "$batch_size" =~ ^[0-9]+$ ]] || [[ "$batch_size" -lt 1 ]]; then
+    error "--batch-size には1以上の整数を指定してください: $batch_size"
+    exit 1
+  fi
+
+  # フィルタが1つも指定されていないかチェック
+  if [[ -z "$since" ]] && [[ -z "$until_date" ]] && [[ -z "$pr_numbers" ]]; then
+    error "フィルタが1つも指定されていません。--since, --until, --pr-numbers のいずれかを指定してください。"
+    exit 1
+  fi
+
+  # ソースリポジトリのフォーマットバリデーション
+  if [[ -n "$source_repo" ]] && ! [[ "$source_repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+    error "--source のフォーマットが不正です（OWNER/REPO）: $source_repo"
+    exit 1
+  fi
+
+  require_git_repo
+
+  # _architecture-tracker ブランチの存在確認
+  local remote_url
+  remote_url=$(git remote get-url origin)
+  if ! git ls-remote --heads "$remote_url" _architecture-tracker 2>/dev/null | grep -q '_architecture-tracker'; then
+    error "_architecture-tracker ブランチが存在しません。"
+    info "先に 'gh architecture-tracker init' を実行してください。"
+    exit 1
+  fi
+
+  # リポジトリ情報の取得
+  local repo
+  repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
+  if [[ -z "$repo" ]]; then
+    error "リポジトリ情報を取得できませんでした。GitHub リモートが設定されていることを確認してください。"
+    exit 1
+  fi
+
+  # 対象PRの概算表示
+  local target_repo="${source_repo:-${repo}}"
+
+  if [[ -n "$pr_numbers" ]]; then
+    local count
+    count=$(echo "$pr_numbers" | tr ',' '\n' | wc -l | tr -d '[:space:]')
+    info "対象PR: ${count}件（指定PR番号: ${pr_numbers}）"
+  else
+    info "対象リポジトリ: ${target_repo}"
+    [[ -n "$since" ]] && info "開始日: ${since}"
+    [[ -n "$until_date" ]] && info "終了日: ${until_date}"
+  fi
+  info "バッチサイズ: ${batch_size}"
+  if [ "$dry_run" = true ]; then
+    info "モード: dry-run（プレビューのみ）"
+  fi
+
+  echo ""
+  if ! confirm "catch-up を実行しますか？"; then
+    info "中止しました。"
+    exit 0
+  fi
+
+  # ワークフローのトリガー
+  local workflow_args=()
+  [[ -n "$since" ]] && workflow_args+=(-f "since=${since}")
+  [[ -n "$until_date" ]] && workflow_args+=(-f "until=${until_date}")
+  [[ -n "$pr_numbers" ]] && workflow_args+=(-f "pr-numbers=${pr_numbers}")
+  [[ -n "$source_repo" ]] && workflow_args+=(-f "source-repo=${source_repo}")
+  workflow_args+=(-f "batch-size=${batch_size}")
+  workflow_args+=(-f "dry-run=${dry_run}")
+
+  info "catch-up ワークフローをトリガーしています..."
+  if gh workflow run catch-up.yml "${workflow_args[@]}" --repo "$repo"; then
+    ok "ワークフローをトリガーしました"
+    echo ""
+    info "実行状況は以下で確認できます:"
+    echo "  gh run list --workflow=catch-up.yml --repo ${repo} --limit 1"
+    echo "  https://github.com/${repo}/actions/workflows/catch-up.yml"
+  else
+    error "ワークフローのトリガーに失敗しました。"
+    echo ""
+    echo "考えられる原因:"
+    echo "  - catch-up.yml がデフォルトブランチに存在しない"
+    echo "  - ワークフローの実行権限がない"
+    exit 1
+  fi
+}
+
 cmd_version() {
   echo "gh-architecture-tracker v${VERSION}"
 
@@ -677,6 +815,7 @@ gh architecture-tracker — Architecture Tracker セットアップツール
 コマンド:
   init      リポジトリに Architecture Tracker をセットアップする
   update    Architecture Tracker を最新バージョンに更新する
+  catch-up  過去のマージ済みPRを一括で取り込む
   version   バージョン情報を表示する
 
 詳細:
@@ -718,12 +857,33 @@ gh architecture-tracker update — Architecture Tracker を最新バージョン
 EOF
 }
 
+usage_catch_up() {
+  cat <<EOF
+gh architecture-tracker catch-up — 過去のマージ済みPRを一括で取り込む
+
+使い方:
+  gh architecture-tracker catch-up [options]
+
+  過去のマージ済みPRを一括で取り込み、アーキテクチャマッピングを記録します。
+
+オプション:
+  --since DATE       指定日以降にマージされたPR（YYYY-MM-DD）
+  --until DATE       指定日以前にマージされたPR（YYYY-MM-DD）
+  --pr-numbers LIST  対象PR番号（カンマ区切り）
+  --source REPO      外部リポジトリ（OWNER/REPO形式）
+  --batch-size N     バッチサイズ（デフォルト: 10）
+  --dry-run          プレビューのみ（記録しない）
+  -h, --help         このヘルプを表示
+EOF
+}
+
 # --- Main ---
 
 case "${1:-}" in
-  init)    shift; cmd_init "$@" ;;
-  update)  shift; cmd_update "$@" ;;
-  version) cmd_version ;;
+  init)     shift; cmd_init "$@" ;;
+  update)   shift; cmd_update "$@" ;;
+  catch-up) shift; cmd_catch_up "$@" ;;
+  version)  cmd_version ;;
   --help|-h) usage ;;
   "") usage ;;
   *) error "不明なコマンド: $1"; usage; exit 1 ;;
