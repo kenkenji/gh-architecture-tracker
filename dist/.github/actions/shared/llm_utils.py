@@ -90,7 +90,7 @@ def call_claude_code(prompt, model=None, max_retries=2, timeout=300):
     """Claude Code CLIを呼び出す。CLAUDE_CODE_OAUTH_TOKENで認証する。
     プロンプトはstdin経由で渡す（コマンドライン引数長制限の回避）。"""
     model = model or DEFAULT_ANTHROPIC_MODEL
-    cmd = ["claude", "-p", "--output-format", "text", "--model", model, "--max-turns", "1"]
+    cmd = ["claude", "-p", "--output-format", "text", "--model", model, "--max-turns", "3"]
 
     for attempt in range(max_retries + 1):
         try:
