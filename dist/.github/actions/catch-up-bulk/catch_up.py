@@ -23,7 +23,7 @@ from extract_components import (
     build_prompt,
     validate_component_ids,
 )
-from update_data import update_mappings, update_timeline, read_model_version
+from update_data import update_mappings, update_timeline, read_model_version, _mapping_key
 
 
 def parse_args(argv=None):
@@ -43,7 +43,17 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def fetch_merged_prs(repo, since=None, until=None, pr_numbers=None):
+def _format_access_error(repo, stderr):
+    """ソースリポジトリへのアクセスエラー時の診断メッセージを生成する。"""
+    msg = f"Error: リポジトリ '{repo}' へのアクセスに失敗しました: {stderr.strip()}\n"
+    msg += "考えられる原因:\n"
+    msg += f"  - リポジトリ '{repo}' が存在しない\n"
+    msg += f"  - リポジトリがprivateで、現在のトークンに読み取り権限がない\n"
+    msg += "  - GitHub Appがソースリポジトリにインストールされていない\n"
+    return msg
+
+
+def fetch_merged_prs(repo, since=None, until=None, pr_numbers=None, is_source_repo=False):
     """GitHub APIからマージ済みPRを取得する。"""
     if pr_numbers:
         prs = []
@@ -53,6 +63,9 @@ def fetch_merged_prs(repo, since=None, until=None, pr_numbers=None):
                 capture_output=True, text=True,
             )
             if result.returncode != 0:
+                if is_source_repo and ("Not Found" in result.stderr or "403" in result.stderr):
+                    print(_format_access_error(repo, result.stderr), file=sys.stderr)
+                    break
                 print(f"Warning: PR #{num} の取得に失敗: {result.stderr.strip()}", file=sys.stderr)
                 continue
             pr = json.loads(result.stdout)
@@ -72,7 +85,10 @@ def fetch_merged_prs(repo, since=None, until=None, pr_numbers=None):
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            print(f"Error: PR一覧の取得に失敗: {result.stderr.strip()}", file=sys.stderr)
+            if is_source_repo and ("Not Found" in result.stderr or "403" in result.stderr):
+                print(_format_access_error(repo, result.stderr), file=sys.stderr)
+            else:
+                print(f"Error: PR一覧の取得に失敗: {result.stderr.strip()}", file=sys.stderr)
             break
         page_prs = json.loads(result.stdout)
         if not page_prs:
@@ -100,13 +116,14 @@ def fetch_merged_prs(repo, since=None, until=None, pr_numbers=None):
     return prs
 
 
-def filter_already_recorded(prs, mappings_data):
+def filter_already_recorded(prs, mappings_data, source_repo=None):
     """既にmappings.jsonに記録済みのPRを除外する。"""
     existing = set(mappings_data.get("mappings", {}).keys())
     filtered = []
     skipped = []
     for pr in prs:
-        if str(pr["number"]) in existing:
+        key = _mapping_key(pr["number"], source_repo)
+        if key in existing:
             skipped.append(pr["number"])
         else:
             filtered.append(pr)
@@ -252,8 +269,11 @@ def run(args):
 
     model_version = read_model_version(components_path)
 
+    source_repo = args.source_repo
+    is_source_repo = source_repo is not None
+
     print(f"📋 マージ済みPR取得中... (repo: {target_repo})")
-    prs = fetch_merged_prs(target_repo, args.since, args.until, pr_numbers_list)
+    prs = fetch_merged_prs(target_repo, args.since, args.until, pr_numbers_list, is_source_repo)
     print(f"   取得PR数: {len(prs)}")
 
     if not prs:
@@ -261,7 +281,7 @@ def run(args):
         _set_outputs(0, 0, 0, 0)
         return
 
-    prs_to_process, skipped_prs = filter_already_recorded(prs, mappings_data)
+    prs_to_process, skipped_prs = filter_already_recorded(prs, mappings_data, source_repo)
     print(f"   既記録スキップ: {len(skipped_prs)}件")
     print(f"   処理対象: {len(prs_to_process)}件")
 
@@ -309,7 +329,7 @@ def run(args):
                 source="ai", ai_components=components,
                 model_version=model_version,
                 diff_stats=diff_stats, labels=labels,
-                auto_approved=True,
+                auto_approved=True, source_repo=source_repo,
             )
             timeline_data = update_timeline(
                 timeline_data, pr_number, pr_title, pr_url,
@@ -317,6 +337,7 @@ def run(args):
                 source="ai", ai_components=components,
                 diff_stats=diff_stats, labels=labels,
                 auto_approved=True, merged_at=merged_at,
+                source_repo=source_repo,
             )
 
             with open(mappings_path, "w", encoding="utf-8") as f:

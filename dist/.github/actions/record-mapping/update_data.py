@@ -41,10 +41,18 @@ def parse_args():
     return parser.parse_args()
 
 
+def _mapping_key(pr_number, source_repo=None):
+    """mappings.jsonのキーを生成する。外部リポジトリは "owner/repo#N" 形式。"""
+    if source_repo:
+        return f"{source_repo}#{pr_number}"
+    return str(pr_number)
+
+
 def update_mappings(data, pr_number, pr_title, pr_url, merged_at, components,
                     author, timestamp, source="manual", ai_components=None,
                     no_impact=False, model_version=None,
-                    diff_stats=None, labels=None, auto_approved=False):
+                    diff_stats=None, labels=None, auto_approved=False,
+                    source_repo=None):
     if components and no_impact:
         no_impact = False
     entry = {
@@ -57,6 +65,8 @@ def update_mappings(data, pr_number, pr_title, pr_url, merged_at, components,
         "author": author,
         "timestamp": timestamp,
     }
+    if source_repo:
+        entry["source_repo"] = source_repo
     if ai_components is not None:
         entry["ai_components"] = ai_components
     if no_impact:
@@ -69,15 +79,16 @@ def update_mappings(data, pr_number, pr_title, pr_url, merged_at, components,
         entry["labels"] = labels
     if auto_approved:
         entry["auto_approved"] = True
-    data["mappings"][str(pr_number)] = entry
+    key = _mapping_key(pr_number, source_repo)
+    data["mappings"][key] = entry
     return data
 
 
-def _is_duplicate_timeline_entry(entries, pr_number, components, source):
+def _is_duplicate_timeline_entry(entries, pr_number, components, source, source_repo=None):
     """同一PRのエントリにcomponents+sourceが一致するものがあるか判定する。"""
     sorted_components = sorted(components)
     for entry in entries:
-        if entry.get("pr_number") == pr_number:
+        if entry.get("pr_number") == pr_number and entry.get("source_repo") == source_repo:
             if entry.get("source") == source and sorted(entry.get("components") or []) == sorted_components:
                 return True
     return False
@@ -103,16 +114,19 @@ def _find_insertion_index(entries, merged_at):
 def update_timeline(data, pr_number, pr_title, pr_url, components,
                     author, timestamp, source="manual", ai_components=None,
                     no_impact=False, diff_stats=None, labels=None,
-                    auto_approved=False, merged_at=None):
+                    auto_approved=False, merged_at=None, source_repo=None):
     if components and no_impact:
         no_impact = False
 
-    if _is_duplicate_timeline_entry(data.get("entries", []), pr_number, components, source):
+    if _is_duplicate_timeline_entry(data.get("entries", []), pr_number, components, source, source_repo):
         print(f"Skipped duplicate timeline entry for PR #{pr_number}")
         return data
 
     compact = timestamp.replace("-", "").replace(":", "").replace(".", "")
-    entry_id = f"pr-{pr_number}-{compact}"
+    if source_repo:
+        entry_id = f"pr-{source_repo}#{pr_number}-{compact}"
+    else:
+        entry_id = f"pr-{pr_number}-{compact}"
 
     entry = {
         "id": entry_id,
@@ -124,6 +138,8 @@ def update_timeline(data, pr_number, pr_title, pr_url, components,
         "source": source,
         "author": author,
     }
+    if source_repo:
+        entry["source_repo"] = source_repo
     if merged_at is not None:
         entry["merged_at"] = merged_at
     if ai_components is not None:
