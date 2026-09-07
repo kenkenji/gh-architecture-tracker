@@ -103,6 +103,7 @@ jobs:
           SUCCEEDED: ${{ steps.catch-up.outputs.succeeded }}
           FAILED: ${{ steps.catch-up.outputs.failed }}
           SKIPPED: ${{ steps.catch-up.outputs.skipped }}
+          SUMMARY_JSON: ${{ steps.catch-up.outputs.summary-json }}
           SINCE: ${{ inputs.since }}
           UNTIL: ${{ inputs.until }}
           PR_NUMBERS: ${{ inputs.pr-numbers }}
@@ -118,7 +119,7 @@ jobs:
           elif [ "$DRY_RUN" = "true" ]; then
             echo "## 🔍 Catch-up (Dry Run)" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "## 🏗 Catch-up (Bulk Import)" >> "$GITHUB_STEP_SUMMARY"
+            echo "## 🏗 Catch-up Summary" >> "$GITHUB_STEP_SUMMARY"
           fi
 
           echo "" >> "$GITHUB_STEP_SUMMARY"
@@ -143,6 +144,19 @@ jobs:
           echo "| dry-run | ${DRY_RUN} |" >> "$GITHUB_STEP_SUMMARY"
 
           if [ "$CATCH_UP_CONCLUSION" != "failure" ]; then
+            # 処理時間をサマリーJSONから取得（フォーマット済み文字列）
+            elapsed_display=""
+            if [ -n "$SUMMARY_JSON" ]; then
+              elapsed_display=$(printf '%s\n' "$SUMMARY_JSON" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          print(data.get('elapsed_display', ''))
+          " 2>&1) || {
+                echo "::warning::サマリーJSONからの処理時間取得に失敗: ${elapsed_display}"
+                elapsed_display=""
+              }
+            fi
+
             echo "" >> "$GITHUB_STEP_SUMMARY"
             echo "### 結果" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
@@ -152,4 +166,63 @@ jobs:
             echo "| 成功 | ${SUCCEEDED:-0} |" >> "$GITHUB_STEP_SUMMARY"
             echo "| 失敗 | ${FAILED:-0} |" >> "$GITHUB_STEP_SUMMARY"
             echo "| スキップ（既記録） | ${SKIPPED:-0} |" >> "$GITHUB_STEP_SUMMARY"
+            if [ -n "$elapsed_display" ]; then
+              echo "| 処理時間 | ${elapsed_display} |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+
+            # 失敗PRの詳細テーブル
+            if [ -n "$SUMMARY_JSON" ]; then
+              failed_table=$(printf '%s\n' "$SUMMARY_JSON" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          details = data.get('failed_details', [])
+          if details:
+              print('')
+              print('### 失敗したPR')
+              print('')
+              print('| PR | タイトル | エラー |')
+              print('|----|---------|--------|')
+              for d in details:
+                  nr = d.get('pr_number', '')
+                  title = d.get('title', '').replace('|', '\\\\|')
+                  err = d.get('error', '').replace('|', '\\\\|')
+                  print(f'| #{nr} | {title} | {err} |')
+          " 2>&1) || {
+                echo "::warning::失敗PR詳細テーブルの生成に失敗: ${failed_table}"
+                failed_table=""
+              }
+              if [ -n "$failed_table" ]; then
+                echo "$failed_table" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
+
+            # dry-run時のPR一覧
+            if [ "$DRY_RUN" = "true" ] && [ -n "$SUMMARY_JSON" ]; then
+              dryrun_table=$(printf '%s\n' "$SUMMARY_JSON" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          prs = data.get('dry_run_prs', [])
+          if prs:
+              print('')
+              print('### 処理対象PR一覧')
+              print('')
+              print('| PR | タイトル | マージ日 |')
+              print('|----|---------|----------|')
+              for p in prs:
+                  nr = p.get('number', '')
+                  title = p.get('title', '').replace('|', '\\\\|')
+                  merged = p.get('merged_at', '')[:10]
+                  print(f'| #{nr} | {title} | {merged} |')
+              cost = data.get('estimated_cost', 0)
+              label = data.get('cost_label', 'default')
+              print('')
+              print(f'推定LLMコスト: ~\${cost:.2f} ({label})')
+          " 2>&1) || {
+                echo "::warning::dry-run PR一覧の生成に失敗: ${dryrun_table}"
+                dryrun_table=""
+              }
+              if [ -n "$dryrun_table" ]; then
+                echo "$dryrun_table" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
           fi

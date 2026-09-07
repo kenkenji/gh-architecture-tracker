@@ -63,6 +63,9 @@ outputs:
   skipped:
     description: "スキップしたPR数（既記録）"
     value: ${{ steps.run.outputs.skipped }}
+  summary-json:
+    description: "サマリーJSON"
+    value: ${{ steps.read-summary.outputs.json }}
 
 runs:
   using: "composite"
@@ -157,7 +160,24 @@ runs:
           args+=(--dry-run)
         fi
 
+        args+=(--summary-file "${WORK_DIR}/catch_up_summary.json")
+
         python3 "${ACTION_PATH}/catch_up.py" "${args[@]}"
+
+    - name: Read summary
+      id: read-summary
+      if: always() && steps.run.conclusion != 'skipped'
+      shell: bash
+      env:
+        SUMMARY_FILE: ${{ steps.clone.outputs.work_dir }}/catch_up_summary.json
+      run: |
+        if [ -f "$SUMMARY_FILE" ]; then
+          {
+            echo "json<<SUMMARY_EOF"
+            cat "$SUMMARY_FILE"
+            echo "SUMMARY_EOF"
+          } >> "$GITHUB_OUTPUT"
+        fi
 
     - name: Cleanup
       if: always()

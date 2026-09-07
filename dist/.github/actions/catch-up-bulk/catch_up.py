@@ -40,6 +40,7 @@ def parse_args(argv=None):
     parser.add_argument("--source-repo", default=None, help="外部リポジトリ (OWNER/REPO)")
     parser.add_argument("--batch-size", type=int, default=10)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--summary-file", default=None, help="サマリーJSON出力先")
     return parser.parse_args(argv)
 
 
@@ -51,6 +52,50 @@ def _format_access_error(repo, stderr):
     msg += f"  - リポジトリがprivateで、現在のトークンに読み取り権限がない\n"
     msg += "  - GitHub Appがソースリポジトリにインストールされていない\n"
     return msg
+
+
+def _format_elapsed(seconds):
+    """秒数を人間が読める形式に変換する。"""
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}秒"
+    minutes = seconds // 60
+    secs = seconds % 60
+    if minutes < 60:
+        return f"{minutes}分{secs:02d}秒"
+    hours = minutes // 60
+    mins = minutes % 60
+    return f"{hours}時間{mins:02d}分{secs:02d}秒"
+
+
+def _estimate_cost(num_prs, model=None):
+    """LLM処理のコストを概算する（1PR ≈ 500入力 + 200出力トークン想定）。"""
+    if model:
+        m = model.lower()
+        if "haiku" in m:
+            per_pr, label = 0.005, "Claude Haiku"
+        elif "sonnet" in m:
+            per_pr, label = 0.03, "Claude Sonnet"
+        elif "opus" in m:
+            per_pr, label = 0.15, "Claude Opus"
+        elif "gpt-4o-mini" in m:
+            per_pr, label = 0.005, "GPT-4o mini"
+        elif "gpt-4o" in m:
+            per_pr, label = 0.02, "GPT-4o"
+        else:
+            per_pr, label = 0.03, model
+    else:
+        per_pr, label = 0.03, "default"
+    return num_prs * per_pr, label
+
+
+def _write_summary(summary_file, data):
+    """サマリーJSONをファイルに書き出す。"""
+    if not summary_file:
+        return
+    with open(summary_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
 
 
 def fetch_merged_prs(repo, since=None, until=None, pr_numbers=None, is_source_repo=False):
@@ -272,6 +317,8 @@ def run(args):
     source_repo = args.source_repo
     is_source_repo = source_repo is not None
 
+    start_time = time.time()
+
     print(f"📋 マージ済みPR取得中... (repo: {target_repo})")
     prs = fetch_merged_prs(target_repo, args.since, args.until, pr_numbers_list, is_source_repo)
     print(f"   取得PR数: {len(prs)}")
@@ -279,6 +326,10 @@ def run(args):
     if not prs:
         print("対象PRが0件です。")
         _set_outputs(0, 0, 0, 0)
+        summary = {"processed": 0, "succeeded": 0, "failed": 0, "skipped": 0,
+                   "elapsed_seconds": 0, "elapsed_display": "0秒",
+                   "failed_details": [], "dry_run": args.dry_run}
+        _write_summary(args.summary_file, summary)
         return
 
     prs_to_process, skipped_prs = filter_already_recorded(prs, mappings_data, source_repo)
@@ -288,14 +339,48 @@ def run(args):
     if not prs_to_process:
         print("全て記録済みです。")
         _set_outputs(0, 0, 0, len(skipped_prs))
+        summary = {"processed": 0, "succeeded": 0, "failed": 0,
+                   "skipped": len(skipped_prs), "elapsed_seconds": 0,
+                   "elapsed_display": "0秒",
+                   "failed_details": [], "dry_run": args.dry_run}
+        _write_summary(args.summary_file, summary)
         return
 
     prs_to_process.sort(key=lambda p: p.get("merged_at", ""))
 
+    total = len(prs_to_process)
+
+    if args.dry_run:
+        print(f"\n[DRY RUN] 以下の{total}件のPRが処理対象です:")
+        dry_run_prs = []
+        for pr in prs_to_process:
+            merged_date = pr.get("merged_at", "")[:10]
+            print(f'  #{pr["number"]} "{pr.get("title", "")}" (merged: {merged_date})')
+            dry_run_prs.append({
+                "number": pr["number"],
+                "title": pr.get("title", ""),
+                "merged_at": pr.get("merged_at", ""),
+            })
+        cost, cost_label = _estimate_cost(total, args.model)
+        print(f"推定LLMコスト: ~${cost:.2f} ({cost_label})")
+        _set_outputs(0, 0, 0, len(skipped_prs))
+        elapsed = time.time() - start_time
+        summary = {"processed": 0, "succeeded": 0, "failed": 0,
+                   "skipped": len(skipped_prs), "elapsed_seconds": round(elapsed, 1),
+                   "elapsed_display": _format_elapsed(elapsed),
+                   "failed_details": [], "dry_run": True, "dry_run_prs": dry_run_prs,
+                   "estimated_cost": round(cost, 2), "cost_label": cost_label}
+        _write_summary(args.summary_file, summary)
+        return
+
+    total_batches = (total + args.batch_size - 1) // args.batch_size
+    current_batch = 1
     succeeded = 0
     failed = 0
     failed_details = []
     batch_count = 0
+
+    print(f"\n🚀 処理開始: {total}件のPR ({total_batches}バッチ予定)")
 
     for i, pr in enumerate(prs_to_process):
         pr_number = pr["number"]
@@ -304,19 +389,17 @@ def run(args):
         merged_at = pr.get("merged_at", "")
         author = pr.get("user", {}).get("login", "unknown")
 
-        print(f"\n🔍 [{i+1}/{len(prs_to_process)}] PR #{pr_number}: {pr_title}")
-
-        if args.dry_run:
-            print(f"   [dry-run] スキップ")
-            continue
-
+        result_str = ""
         try:
             components, reasoning = extract_for_pr(
                 pr, components_data, prompt_template, provider, args.model,
             )
-            print(f"   コンポーネント: {components}")
-            if reasoning:
-                print(f"   理由: {reasoning}")
+
+            n = len(components)
+            if n > 0:
+                result_str = f"{n} components extracted ✅"
+            else:
+                result_str = "no_impact (0 components) ✅"
 
             diff_stats, labels = extract_diff_stats_from_pr(pr)
             if diff_stats is None:
@@ -350,59 +433,92 @@ def run(args):
             succeeded += 1
             batch_count += 1
 
-            if batch_count >= args.batch_size:
-                print(f"\n📦 バッチコミット ({batch_count}件)")
+        except Exception as e:
+            result_str = "error, skipped ⚠️"
+            failed += 1
+            failed_details.append({"pr_number": pr_number, "title": pr_title, "error": str(e)})
+
+        # バッチコミット（LLM抽出のtry/exceptとは分離し二重カウントを防ぐ）
+        do_batch = batch_count >= args.batch_size
+        if do_batch:
+            elapsed = time.time() - start_time
+            time_info = f" [経過: {_format_elapsed(elapsed)}]"
+            print(f'[{i+1}/{total}] PR #{pr_number} "{pr_title}" ... {result_str}')
+            print(f"--- Batch {current_batch}/{total_batches} committed ({batch_count} PRs) ---{time_info}")
+            try:
                 pushed = git_commit_and_push(
                     args.work_dir, args.data_branch,
                     f"Catch-up bulk: {batch_count} PRs (up to PR #{pr_number})",
                 )
-                if pushed:
-                    print("   ✅ プッシュ成功")
-                else:
-                    print("   ⚠️ プッシュ失敗、以降の処理を中断します", file=sys.stderr)
-                    break
-                batch_count = 0
+            except Exception as e:
+                print(f"⚠️ バッチコミット失敗: {e}", file=sys.stderr)
+                break
+            if not pushed:
+                print("⚠️ プッシュ失敗、以降の処理を中断します", file=sys.stderr)
+                break
+            current_batch += 1
+            batch_count = 0
+            if i < total - 1:
+                time.sleep(1)
+            continue
 
-        except Exception as e:
-            print(f"   ❌ 失敗: {e}", file=sys.stderr)
-            failed += 1
-            failed_details.append({"pr_number": pr_number, "error": str(e)})
+        elapsed = time.time() - start_time
+        processed_count = i + 1
+        remaining_count = total - processed_count
+        if remaining_count > 0:
+            avg_per_pr = elapsed / processed_count
+            remaining = avg_per_pr * remaining_count
+            time_info = f" [経過: {_format_elapsed(elapsed)}, 残り: ~{_format_elapsed(remaining)}]"
+        else:
+            time_info = f" [経過: {_format_elapsed(elapsed)}]"
 
-        if i < len(prs_to_process) - 1:
+        print(f'[{i+1}/{total}] PR #{pr_number} "{pr_title}" ... {result_str}{time_info}')
+
+        if i < total - 1:
             time.sleep(1)
 
-    if batch_count > 0 and not args.dry_run:
+    if batch_count > 0:
         try:
-            print(f"\n📦 最終バッチコミット ({batch_count}件)")
+            print(f"--- Final batch committed ({batch_count} PRs) ---")
             pushed = git_commit_and_push(
                 args.work_dir, args.data_branch,
                 f"Catch-up bulk: {batch_count} PRs (final batch)",
             )
-            if pushed:
-                print("   ✅ プッシュ成功")
-            else:
-                print("   ⚠️ 最終バッチのプッシュ失敗", file=sys.stderr)
+            if not pushed:
+                print("⚠️ 最終バッチのプッシュ失敗", file=sys.stderr)
         except Exception as e:
-            print(f"   ❌ 最終バッチコミット失敗: {e}", file=sys.stderr)
+            print(f"❌ 最終バッチコミット失敗: {e}", file=sys.stderr)
 
-    # Mermaid図はモデル全体の再生成なので最後のPR番号1回のディスパッチで十分。
-    # バルクキャッチアップ対象の古いPRにはトラッキングIssueが存在しない想定。
-    if succeeded > 0 and not args.dry_run:
+    if succeeded > 0:
         last_pr = prs_to_process[-1]["number"]
         _dispatch_post_record(args.repo, last_pr)
 
+    elapsed = time.time() - start_time
+
     print("\n" + "=" * 50)
     print(f"📊 サマリー")
-    print(f"   処理対象: {len(prs_to_process)}件")
+    print(f"   処理対象: {total}件")
     print(f"   成功: {succeeded}件")
     print(f"   失敗: {failed}件")
     print(f"   スキップ(既記録): {len(skipped_prs)}件")
+    print(f"   処理時間: {_format_elapsed(elapsed)}")
     if failed_details:
         print(f"\n❌ 失敗詳細:")
         for detail in failed_details:
-            print(f"   PR #{detail['pr_number']}: {detail['error']}")
+            print(f'   PR #{detail["pr_number"]} "{detail["title"]}": {detail["error"]}')
 
-    _set_outputs(len(prs_to_process), succeeded, failed, len(skipped_prs))
+    _set_outputs(total, succeeded, failed, len(skipped_prs))
+    summary = {
+        "processed": total,
+        "succeeded": succeeded,
+        "failed": failed,
+        "skipped": len(skipped_prs),
+        "elapsed_seconds": round(elapsed, 1),
+        "elapsed_display": _format_elapsed(elapsed),
+        "failed_details": failed_details,
+        "dry_run": False,
+    }
+    _write_summary(args.summary_file, summary)
 
 
 def _dispatch_post_record(repo, pr_number):
