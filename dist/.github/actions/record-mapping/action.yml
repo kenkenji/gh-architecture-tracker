@@ -200,7 +200,7 @@ runs:
         echo "::error::Failed to push after ${max_retries} retries"
         exit 1
 
-    - name: Notify post-record
+    - name: Notify visualize-impact
       if: steps.update.outputs.pushed == 'true'
       continue-on-error: true
       shell: bash
@@ -212,6 +212,6 @@ runs:
         set -euo pipefail
         gh api "repos/${REPO}/dispatches" \
           --method POST \
-          -f event_type=post-record \
+          -f event_type=visualize-impact \
           -f "client_payload[pr_number]=${PR_NUMBER}"
-        echo "📤 Dispatched post-record for PR #${PR_NUMBER}"
+        echo "📤 Dispatched visualize-impact for PR #${PR_NUMBER}"

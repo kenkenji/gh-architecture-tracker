@@ -507,7 +507,7 @@ runs:
         echo "::error::Failed to push auto-approved mapping after ${max_retries} retries"
         exit 1
 
-    - name: Notify post-record (auto-record)
+    - name: Notify visualize-impact (auto-record)
       if: >-
         steps.build.outputs.should_auto_record == 'true'
         && steps.auto-record.outputs.pushed == 'true'
@@ -521,9 +521,9 @@ runs:
         set -euo pipefail
         gh api "repos/${REPO}/dispatches" \
           --method POST \
-          -f event_type=post-record \
+          -f event_type=visualize-impact \
           -f "client_payload[pr_number]=${PR_NUMBER}"
-        echo "📤 Dispatched post-record for PR #${PR_NUMBER}"
+        echo "📤 Dispatched visualize-impact for PR #${PR_NUMBER}"
 
     - name: Warn auto-record failure
       if: >-

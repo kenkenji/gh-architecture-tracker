@@ -491,7 +491,7 @@ def run(args):
 
     if succeeded > 0:
         last_pr = prs_to_process[-1]["number"]
-        _dispatch_post_record(args.repo, last_pr)
+        _dispatch_visualize_impact(args.repo, last_pr)
 
     elapsed = time.time() - start_time
 
@@ -521,19 +521,19 @@ def run(args):
     _write_summary(args.summary_file, summary)
 
 
-def _dispatch_post_record(repo, pr_number):
-    """post-recordイベントをディスパッチする。"""
+def _dispatch_visualize_impact(repo, pr_number):
+    """visualize-impactイベントをディスパッチする。"""
     result = subprocess.run(
         ["gh", "api", f"repos/{repo}/dispatches",
          "--method", "POST",
-         "-f", "event_type=post-record",
+         "-f", "event_type=visualize-impact",
          "-f", f"client_payload[pr_number]={pr_number}"],
         capture_output=True, text=True,
     )
     if result.returncode == 0:
-        print(f"📤 post-record ディスパッチ完了 (PR #{pr_number})")
+        print(f"📤 visualize-impact ディスパッチ完了 (PR #{pr_number})")
     else:
-        print(f"Warning: post-record ディスパッチ失敗: {result.stderr.strip()}", file=sys.stderr)
+        print(f"Warning: visualize-impact ディスパッチ失敗: {result.stderr.strip()}", file=sys.stderr)
 
 
 def _set_outputs(processed, succeeded, failed, skipped):
