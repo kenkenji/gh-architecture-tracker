@@ -334,7 +334,9 @@ runs:
         fi
 
         # 構造変更提案がある場合はbuild_comment.pyに渡す
+        has_proposals="false"
         if [ -n "$PROPOSALS" ] && [ "$PROPOSALS" != "[]" ]; then
+          has_proposals="true"
           extra_args+=(--proposals "$PROPOSALS")
           extra_args+=(--detection-method "$DETECTION_METHOD")
           echo "📋 Including structural change proposals in comment"
@@ -360,6 +362,18 @@ runs:
         rm -f "$components_file"
         echo "comment_file=${comment_file}" >> "$GITHUB_OUTPUT"
         echo "should_auto_record=${should_auto_record:-false}" >> "$GITHUB_OUTPUT"
+
+        # トラッキングIssue作成が必要か判定
+        # - AI抽出が失敗/利用不可 → ユーザー対応が必要
+        # - auto_approve=false かつ構造変更提案あり → ユーザー判断が必要
+        # ※ auto-record失敗はbuild時点で未知のためYAML側で判定
+        should_create_issue="false"
+        if [ "$AI_OUTCOME" != "success" ] || [ "$AI_SKIPPED" = "true" ]; then
+          should_create_issue="true"
+        elif [ "$AUTO_APPROVE" != "true" ] && [ "$has_proposals" = "true" ]; then
+          should_create_issue="true"
+        fi
+        echo "should_create_issue=${should_create_issue}" >> "$GITHUB_OUTPUT"
 
     - name: Post or update comment with result
       if: steps.check.outputs.already_posted != 'true'
@@ -543,7 +557,7 @@ runs:
       if: >-
         steps.check.outputs.already_posted != 'true'
         && inputs.mode != 'regenerate'
-        && (steps.build.outputs.should_auto_record != 'true'
+        && (steps.build.outputs.should_create_issue == 'true'
             || steps.auto-record.outcome == 'failure')
       shell: bash
       env:
