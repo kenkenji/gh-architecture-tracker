@@ -38,7 +38,7 @@ require_default_branch() {
     exit 1
   fi
   local default_branch
-  default_branch=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || echo "main")
+  default_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || echo "main")
   if [ "$current_branch" != "$default_branch" ]; then
     error "デフォルトブランチ（${default_branch}）で実行してください。現在のブランチ: ${current_branch}"
     exit 1
@@ -68,9 +68,12 @@ require_app_installed() {
   fi
 }
 
+get_repo_nwo() {
+  git remote get-url origin 2>/dev/null | sed -E 's|.*github\.com[:/]||; s|\.git$||'
+}
+
 get_repo_name() {
-  gh repo view --json name --jq '.name' 2>/dev/null || \
-    git remote get-url origin 2>/dev/null | sed 's|.*/||;s|\.git$||' || \
+  git remote get-url origin 2>/dev/null | sed 's|.*/||;s|\.git$||' || \
     basename "$(get_repo_root)"
 }
 
@@ -170,8 +173,8 @@ relations: []
 YAML
 
   local owner repo_name
-  owner=$(gh repo view --json owner --jq '.owner.login' 2>/dev/null || echo "")
-  repo_name=$(gh repo view --json name --jq '.name' 2>/dev/null || echo "")
+  owner=$(get_repo_nwo | cut -d/ -f1)
+  repo_name=$(get_repo_name)
   cat > "${work_dir}/config.yaml" << YAML
 spa:
   url: https://${owner}.github.io/${repo_name}
@@ -326,7 +329,7 @@ deploy_spa_to_ghpages() {
 
   # ベースパスとリポジトリ情報を注入
   local owner
-  owner=$(gh repo view --json owner --jq '.owner.login' 2>/dev/null || git remote get-url origin 2>/dev/null | sed 's|.*github\.com[:/]\([^/]*\)/.*|\1|' || echo "")
+  owner=$(get_repo_nwo | cut -d/ -f1)
   for f in "${work_dir}/index.html" "${work_dir}/404.html"; do
     if [ -f "$f" ]; then
       sed_inplace "s|__AT_BASE_PATH__ = '/'|__AT_BASE_PATH__ = '/${repo_name}/'|" "$f"
@@ -475,7 +478,7 @@ Installed via gh-architecture-tracker CLI extension.
     echo ""
 
     local repo
-    repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
+    repo=$(get_repo_nwo)
 
     # データブランチ作成・バージョンマーカー書き込み
     # create_data_branch は新規作成時に VERSION_MARKER を含めるため、
@@ -729,7 +732,7 @@ cmd_catch_up() {
 
   # リポジトリ情報の取得
   local repo
-  repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
+  repo=$(get_repo_nwo)
   if [[ -z "$repo" ]]; then
     error "リポジトリ情報を取得できませんでした。GitHub リモートが設定されていることを確認してください。"
     exit 1
