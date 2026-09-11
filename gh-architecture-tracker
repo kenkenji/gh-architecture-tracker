@@ -236,18 +236,9 @@ configure_branch_protection() {
 
   info "ブランチ保護を設定しています..."
 
-  if gh api "repos/${repo}/branches/_architecture-tracker/protection" \
-    -X PUT \
-    --input - << 'JSON' 2>/dev/null; then
-{
-  "required_status_checks": null,
-  "enforce_admins": false,
-  "required_pull_request_reviews": null,
-  "restrictions": null,
-  "allow_force_pushes": false,
-  "allow_deletions": false
-}
-JSON
+  local body='{"required_status_checks":null,"enforce_admins":false,"required_pull_request_reviews":null,"restrictions":null,"allow_force_pushes":false,"allow_deletions":false}'
+  if echo "$body" | gh api "repos/${repo}/branches/_architecture-tracker/protection" \
+    -X PUT --input - 2>/dev/null; then
     ok "ブランチ保護を設定しました"
   else
     warn "ブランチ保護の設定に失敗しました（権限不足の可能性があります）"
