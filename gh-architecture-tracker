@@ -243,7 +243,7 @@ configure_branch_protection() {
   tmpfile=$(mktemp) || { warn "一時ファイルの作成に失敗しました"; return 1; }
   printf '%s\n' '{"required_status_checks":null,"enforce_admins":false,"required_pull_request_reviews":null,"restrictions":null,"allow_force_pushes":false,"allow_deletions":false}' > "$tmpfile"
   if gh api "repos/${repo}/branches/_architecture-tracker/protection" \
-    -X PUT --input "$tmpfile" 2>/dev/null; then
+    -X PUT --input "$tmpfile" --silent 2>/dev/null; then
     ok "ブランチ保護を設定しました"
   else
     warn "ブランチ保護の設定に失敗しました（権限不足の可能性があります）"
