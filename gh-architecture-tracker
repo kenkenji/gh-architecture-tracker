@@ -418,7 +418,7 @@ cmd_init() {
   fi
 
   # .github/actions/
-  local actions=("track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa" "detect-model-changes" "bump-model-version" "analyze-impact" "catch-up-bulk")
+  local actions=("shared" "track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa" "detect-model-changes" "bump-model-version" "analyze-impact" "catch-up-bulk")
   local action_count=0
   for action in "${actions[@]}"; do
     if [ -d "${DIST_DIR}/.github/actions/${action}" ]; then
@@ -583,7 +583,7 @@ cmd_update() {
   fi
 
   # Composite Actions
-  local actions=("track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa" "detect-model-changes" "bump-model-version" "analyze-impact" "catch-up-bulk")
+  local actions=("shared" "track-architecture" "extract-components" "record-mapping" "generate-mermaid" "catch-up-mapping" "deploy-spa" "detect-model-changes" "bump-model-version" "analyze-impact" "catch-up-bulk")
   for action in "${actions[@]}"; do
     if [ -d "${DIST_DIR}/.github/actions/${action}" ]; then
       mkdir -p "${root}/.github/actions/${action}"
