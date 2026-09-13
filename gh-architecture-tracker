@@ -652,7 +652,7 @@ Updated via gh-architecture-tracker CLI extension."
 }
 
 cmd_catch_up() {
-  local since="" until_date="" pr_numbers="" source_repo="" batch_size="10" dry_run=false
+  local since="" until_date="" pr_numbers="" source_repo="" batch_size="10" dry_run=false detect_changes=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -672,6 +672,7 @@ cmd_catch_up() {
         if [[ -z "${2:-}" ]]; then error "--batch-size には数値を指定してください"; exit 1; fi
         batch_size="$2"; shift 2 ;;
       --dry-run) dry_run=true; shift ;;
+      --detect-changes) detect_changes=true; shift ;;
       --help|-h) usage_catch_up; exit 0 ;;
       *) error "不明なオプション: $1"; usage_catch_up; exit 1 ;;
     esac
@@ -751,6 +752,9 @@ cmd_catch_up() {
     [[ -n "$until_date" ]] && info "終了日: ${until_date}"
   fi
   info "バッチサイズ: ${batch_size}"
+  if [ "$detect_changes" = true ]; then
+    info "モード: モデル変更検出あり"
+  fi
   if [ "$dry_run" = true ]; then
     info "モード: dry-run（プレビューのみ）"
   fi
@@ -769,6 +773,7 @@ cmd_catch_up() {
   [[ -n "$source_repo" ]] && workflow_args+=(-f "source-repo=${source_repo}")
   workflow_args+=(-f "batch-size=${batch_size}")
   workflow_args+=(-f "dry-run=${dry_run}")
+  workflow_args+=(-f "detect-changes=${detect_changes}")
 
   info "catch-up ワークフローをトリガーしています..."
   if gh workflow run catch-up.yml "${workflow_args[@]}" --repo "$repo"; then
@@ -870,6 +875,7 @@ gh architecture-tracker catch-up — 過去のマージ済みPRを一括で取�
   --source REPO      外部リポジトリ（OWNER/REPO形式）
   --batch-size N     バッチサイズ（デフォルト: 10）
   --dry-run          プレビューのみ（記録しない）
+  --detect-changes   モデル変更検出を有効にする（auto_approve: true が必要）
   -h, --help         このヘルプを表示
 EOF
 }
