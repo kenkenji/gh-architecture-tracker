@@ -298,6 +298,12 @@ runs:
             fi
           fi
 
+          # AI再抽出がコンポーネントを返した場合、既存のno_impactを上書きする
+          ai_has_components="false"
+          if [ "$AI_OUTCOME" = "success" ] && [ "$AI_SKIPPED" != "true" ] && [ -n "$AI_COMPONENTS" ] && [ "$AI_COMPONENTS" != "[]" ]; then
+            ai_has_components="true"
+          fi
+
           # チェックボックス状態: mappings.json（実態）を優先し、未記録なら既存コメントにフォールバック
           mapping_info=$(gh api "repos/${REPO}/contents/mappings.json?ref=${DATA_BRANCH}" \
             --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | \
@@ -317,16 +323,20 @@ runs:
             if [ "$mapped_components" != "[]" ]; then
               extra_args+=(--checked-components "$mapped_components")
             fi
-            if [ "$mapped_no_impact" = "true" ]; then
+            if [ "$mapped_no_impact" = "true" ] && [ "$ai_has_components" != "true" ]; then
               extra_args+=(--no-impact-checked)
+            elif [ "$mapped_no_impact" = "true" ]; then
+              echo "📋 Clearing no_impact: AI re-extraction found components"
             fi
             echo "📋 Checkbox state from mappings.json"
           else
             if [ -n "$EXISTING_CHECKED" ] && [ "$EXISTING_CHECKED" != "[]" ]; then
               extra_args+=(--checked-components "$EXISTING_CHECKED")
             fi
-            if [ "$EXISTING_NO_IMPACT" = "true" ]; then
+            if [ "$EXISTING_NO_IMPACT" = "true" ] && [ "$ai_has_components" != "true" ]; then
               extra_args+=(--no-impact-checked)
+            elif [ "$EXISTING_NO_IMPACT" = "true" ]; then
+              echo "📋 Clearing no_impact: AI re-extraction found components"
             fi
             echo "📋 No mapping recorded, using existing comment state"
           fi
