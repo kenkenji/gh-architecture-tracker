@@ -75,7 +75,7 @@ def build_checkbox_section(data, ai_component_ids=None, checked_ids=None):
         ai_component_ids = set(ai_component_ids)
 
     if checked_ids is not None:
-        pre_checked = set(checked_ids) | ai_component_ids
+        pre_checked = set(checked_ids)
     else:
         pre_checked = ai_component_ids
 

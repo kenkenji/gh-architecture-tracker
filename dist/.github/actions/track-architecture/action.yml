@@ -277,7 +277,7 @@ runs:
         ai_notice=""
 
         if [ "$MODE" = "regenerate" ]; then
-          # 再生成: LLM再抽出が成功した場合は新しい結果を使用、失敗/スキップ時は既存状態を復元
+          # 再生成: AIコンポーネント情報の決定（メタデータマーカー用）
           if [ "$AI_OUTCOME" = "success" ] && [ "$AI_SKIPPED" != "true" ]; then
             if [ -n "$AI_COMPONENTS" ] && [ "$AI_COMPONENTS" != "[]" ]; then
               extra_args=(--ai-components "$AI_COMPONENTS")
@@ -290,17 +290,44 @@ runs:
             if [ -n "$EXISTING_AI_COMPONENTS" ] && [ "$EXISTING_AI_COMPONENTS" != "[]" ]; then
               extra_args=(--ai-components "$EXISTING_AI_COMPONENTS")
             fi
+            if [ "$AI_SKIPPED" = "true" ]; then
+              echo "🔄 LLM API key not configured, regenerating with existing state"
+            else
+              echo "🔄 LLM re-extraction failed, regenerating with existing state (source: ${EXISTING_SOURCE})"
+            fi
+          fi
+
+          # チェックボックス状態: mappings.json（実態）を優先し、未記録なら既存コメントにフォールバック
+          mapping_info=$(gh api "repos/${REPO}/contents/mappings.json?ref=${DATA_BRANCH}" \
+            --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | \
+            python3 -c "
+        import sys, json, os
+        data = json.load(sys.stdin)
+        entry = data.get('mappings', {}).get(os.environ['PR_NUMBER'], {})
+        print('true' if entry else 'false')
+        print(json.dumps(entry.get('components', [])))
+        print('true' if entry.get('no_impact', False) else 'false')
+        " 2>/dev/null || printf 'false\n[]\nfalse')
+          mapping_found=$(echo "$mapping_info" | sed -n '1p')
+          mapped_components=$(echo "$mapping_info" | sed -n '2p')
+          mapped_no_impact=$(echo "$mapping_info" | sed -n '3p')
+
+          if [ "$mapping_found" = "true" ]; then
+            if [ "$mapped_components" != "[]" ]; then
+              extra_args+=(--checked-components "$mapped_components")
+            fi
+            if [ "$mapped_no_impact" = "true" ]; then
+              extra_args+=(--no-impact-checked)
+            fi
+            echo "📋 Checkbox state from mappings.json"
+          else
             if [ -n "$EXISTING_CHECKED" ] && [ "$EXISTING_CHECKED" != "[]" ]; then
               extra_args+=(--checked-components "$EXISTING_CHECKED")
             fi
             if [ "$EXISTING_NO_IMPACT" = "true" ]; then
               extra_args+=(--no-impact-checked)
             fi
-            if [ "$AI_SKIPPED" = "true" ]; then
-              echo "🔄 LLM API key not configured, regenerating with existing state"
-            else
-              echo "🔄 LLM re-extraction failed, regenerating with existing state (source: ${EXISTING_SOURCE})"
-            fi
+            echo "📋 No mapping recorded, using existing comment state"
           fi
         else
           # 新規: LLM抽出結果を使用
