@@ -424,7 +424,7 @@ jobs:
           spa-url: ${{ steps.config.outputs.spa_url }}
           pr-number: ${{ github.event.inputs.pr-number || github.event.client_payload.pr_number }}
           pr-title: ${{ steps.pr-info.outputs.pr_title || steps.pr-info-dispatch.outputs.pr_title }}
-          mode: ${{ github.event_name == 'repository_dispatch' && 'regenerate' || 'new' }}
+          mode: ${{ (github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch') && 'regenerate' || 'new' }}
           comment-id: ${{ needs.post-processing-comment.outputs.comment-id }}
           auto-approve: ${{ steps.config.outputs.auto_approve }}
 

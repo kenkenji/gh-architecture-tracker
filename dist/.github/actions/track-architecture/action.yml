@@ -233,6 +233,7 @@ runs:
         claude-code-oauth-token: ${{ inputs.claude-code-oauth-token }}
         model: ${{ inputs.model }}
         pr-body: ${{ steps.fetch-pr-body.outputs.pr_body }}
+        pr-number: ${{ inputs.pr-number || github.event.pull_request.number }}
 
     - name: Fetch components and build comment
       if: steps.check.outputs.already_posted != 'true'
