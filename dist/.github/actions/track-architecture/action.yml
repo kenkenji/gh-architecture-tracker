@@ -609,6 +609,30 @@ runs:
             --trigger-pr-url "https://github.com/${REPO}/pull/${PR_NUMBER}" \
             --author "auto-approve"
 
+          # mappings.json を更新: 適用したコンポーネントIDを追加し、no_impactを解除
+          mappings_file="${work_dir}/mappings.json"
+          if [ -f "$mappings_file" ]; then
+            MAPPINGS_FILE="$mappings_file" APPLY_OUTPUT="$apply_output" python3 -c "
+        import json, os
+        mappings_path = os.environ['MAPPINGS_FILE']
+        apply_output = json.loads(os.environ['APPLY_OUTPUT'])
+        with open(mappings_path, encoding='utf-8') as f:
+            data = json.load(f)
+        entry = data.get('mappings', {}).get(os.environ['PR_NUMBER'], {})
+        if entry:
+            applied_ids = [r['id'] for r in apply_output.get('results', [])
+                           if r.get('status') == 'applied' and r.get('action') == 'add' and 'id' in r]
+            if applied_ids:
+                existing = set(entry.get('components', []))
+                existing.update(applied_ids)
+                entry['components'] = sorted(existing)
+                entry.pop('no_impact', None)
+                with open(mappings_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                    f.write('\n')
+            "
+          fi
+
           # proposals/pr-N.json を resolved 状態に更新
           if [ -f "$proposals_file" ]; then
             PROPOSALS_FILE="$proposals_file" python3 -c "
@@ -631,7 +655,7 @@ runs:
           cd "$work_dir"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add components.yaml model-changelog.json
+          git add components.yaml model-changelog.json mappings.json
           if [ -f "proposals/pr-${PR_NUMBER}.json" ]; then
             git add "proposals/pr-${PR_NUMBER}.json"
           fi
@@ -678,10 +702,28 @@ runs:
           -f "client_payload[pr_number]=${PR_NUMBER}"
         echo "📤 Dispatched regenerate-comment for PR #${PR_NUMBER}"
 
+    - name: Notify visualize-impact (auto-apply)
+      if: >-
+        steps.auto-apply-proposals.outputs.applied == 'true'
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
+      run: |
+        set -euo pipefail
+        gh api "repos/${REPO}/dispatches" \
+          --method POST \
+          -f event_type=visualize-impact \
+          -f "client_payload[pr_number]=${PR_NUMBER}"
+        echo "📤 Dispatched visualize-impact (post auto-apply) for PR #${PR_NUMBER}"
+
     - name: Notify visualize-impact (auto-record)
       if: >-
         steps.build.outputs.should_auto_record == 'true'
         && steps.auto-record.outputs.pushed == 'true'
+        && steps.auto-apply-proposals.outputs.applied != 'true'
       continue-on-error: true
       shell: bash
       env:
