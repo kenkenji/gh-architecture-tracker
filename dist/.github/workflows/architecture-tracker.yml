@@ -432,7 +432,7 @@ jobs:
     if: >-
       !failure() && !cancelled()
       && needs.post-comment.result == 'success'
-      && github.event_name == 'repository_dispatch'
+      && (github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch')
     needs: post-comment
     runs-on: ubuntu-latest
     permissions:
@@ -457,7 +457,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+          PR_NUMBER: ${{ github.event.client_payload.pr_number || github.event.inputs.pr-number }}
         run: |
           set -euo pipefail
           gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
@@ -470,7 +470,7 @@ jobs:
         with:
           github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
           data-branch: _architecture-tracker
-          pr-number: ${{ github.event.client_payload.pr_number }}
+          pr-number: ${{ github.event.client_payload.pr_number || github.event.inputs.pr-number }}
           pr-title: ${{ steps.pr-info.outputs.pr_title }}
           pr-url: ${{ steps.pr-info.outputs.pr_url }}
           merged-at: ${{ steps.pr-info.outputs.merged_at }}

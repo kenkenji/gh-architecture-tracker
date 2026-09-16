@@ -284,19 +284,9 @@ runs:
             if [ -n "$AI_COMPONENTS" ] && [ "$AI_COMPONENTS" != "[]" ]; then
               extra_args=(--ai-components "$AI_COMPONENTS")
               echo "🔄 Regenerating with re-extracted AI components (provider: ${AI_PROVIDER})"
-              if [ "$AUTO_APPROVE" = "true" ]; then
-                extra_args+=(--auto-approve)
-                should_auto_record="true"
-                echo "🔄 Auto-approve mode: will auto-record after posting"
-              fi
             else
               extra_args=(--no-impact-default)
               echo "🔄 Re-extraction found no matching components (provider: ${AI_PROVIDER})"
-              if [ "$AUTO_APPROVE" = "true" ]; then
-                extra_args+=(--auto-approve)
-                should_auto_record="true"
-                echo "🔄 Auto-approve mode: will auto-record no_impact after posting"
-              fi
             fi
           else
             if [ -n "$EXISTING_AI_COMPONENTS" ] && [ "$EXISTING_AI_COMPONENTS" != "[]" ]; then
@@ -452,6 +442,7 @@ runs:
       if: >-
         steps.check.outputs.already_posted != 'true'
         && steps.build.outputs.should_auto_record == 'true'
+        && inputs.mode != 'regenerate'
       continue-on-error: true
       shell: bash
       env:
