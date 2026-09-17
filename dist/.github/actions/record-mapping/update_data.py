@@ -79,7 +79,19 @@ def update_mappings(data, pr_number, pr_title, pr_url, merged_at, components,
         entry["labels"] = labels
     if auto_approved:
         entry["auto_approved"] = True
+
     key = _mapping_key(pr_number, source_repo)
+    existing = data["mappings"].get(key)
+    if existing:
+        entry["components"] = sorted(set(existing.get("components", [])) | set(components))
+        for field in ("ai_components", "model_version", "diff_stats", "labels", "source_repo"):
+            if field not in entry and field in existing:
+                entry[field] = existing[field]
+        if entry["components"]:
+            entry.pop("no_impact", None)
+        elif existing.get("no_impact") and "no_impact" not in entry:
+            entry["no_impact"] = True
+
     data["mappings"][key] = entry
     return data
 
