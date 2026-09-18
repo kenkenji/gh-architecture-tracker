@@ -212,10 +212,6 @@ def build_comment(pr_number, pr_title, data, source="manual", ai_component_ids=N
     if source == "ai" and ai_component_ids:
         ai_marker = f"\n<!-- ai-components: {json.dumps(ai_component_ids, ensure_ascii=False)} -->"
 
-    auto_approve_marker = ""
-    if auto_approve:
-        auto_approve_marker = "\n<!-- auto-approved: true -->"
-
     proposals_markers = ""
     if proposals:
         proposals_markers = f"\n<!-- has-proposals: true -->\n<!-- detection-method: {detection_method} -->"
@@ -235,7 +231,7 @@ def build_comment(pr_number, pr_title, data, source="manual", ai_component_ids=N
     return f"""\
 ## 🏗 Architecture Tracker
 
-<!-- source: {source} -->{ai_marker}{auto_approve_marker}{proposals_markers}
+<!-- source: {source} -->{ai_marker}{proposals_markers}
 
 **PR #{pr_number}**: {escape_markdown(pr_title)}
 
