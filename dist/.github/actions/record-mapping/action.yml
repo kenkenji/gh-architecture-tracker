@@ -122,7 +122,7 @@ runs:
       run: |
         set -euo pipefail
 
-        max_retries=3
+        max_retries=5
         retry=0
 
         ai_args=()
@@ -207,7 +207,8 @@ runs:
           retry=$((retry + 1))
           cd /tmp
           rm -rf "$work_dir"
-          sleep $((retry * 2))
+          # 別 PR の run と同じタイミングで再試行し続けないよう、待ち時間に揺らぎを入れる
+          sleep $((retry * 2 + RANDOM % 5))
         done
 
         echo "::error::Failed to push after ${max_retries} retries"

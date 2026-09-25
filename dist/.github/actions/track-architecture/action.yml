@@ -484,7 +484,7 @@ runs:
           no_impact_args=(--no-impact)
         fi
 
-        max_retries=3
+        max_retries=5
         retry=0
 
         GIT_AUTH_HEADER="AUTHORIZATION: basic $(echo -n "x-access-token:${GH_TOKEN}" | base64 | tr -d '\n')"
@@ -555,7 +555,8 @@ runs:
           retry=$((retry + 1))
           cd /tmp
           rm -rf "$work_dir"
-          sleep $((retry * 2))
+          # 別 PR の run と同じタイミングで再試行し続けないよう、待ち時間に揺らぎを入れる
+          sleep $((retry * 2 + RANDOM % 5))
         done
 
         echo "::error::Failed to push auto-approved mapping after ${max_retries} retries"
@@ -584,7 +585,7 @@ runs:
         APPLY_SCRIPT="${ACTION_PATH}/../detect-model-changes/apply_changes.py"
         BUMP_SCRIPT="${ACTION_PATH}/../bump-model-version/bump_version.py"
 
-        max_retries=3
+        max_retries=5
         retry=0
 
         GIT_AUTH_HEADER="AUTHORIZATION: basic $(echo -n "x-access-token:${GH_TOKEN}" | base64 | tr -d '\n')"
@@ -719,7 +720,8 @@ runs:
           retry=$((retry + 1))
           cd /tmp
           rm -rf "$work_dir"
-          sleep $((retry * 2))
+          # 別 PR の run と同じタイミングで再試行し続けないよう、待ち時間に揺らぎを入れる
+          sleep $((retry * 2 + RANDOM % 5))
         done
 
         echo "::error::Failed to push auto-applied proposals after ${max_retries} retries"
