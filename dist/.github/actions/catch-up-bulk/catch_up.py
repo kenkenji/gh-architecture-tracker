@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.join(actions_dir, "detect-model-changes"))
 sys.path.insert(0, os.path.join(actions_dir, "bump-model-version"))
 
 from llm_utils import detect_provider, call_llm, parse_llm_response
+from schema_utils import check_schema_version
 from extract_components import (
     format_components_for_prompt,
     build_prompt,
@@ -444,6 +445,7 @@ def run(args):
         timeline_data = json.load(f)
     with open(components_path, encoding="utf-8") as f:
         components_data = yaml.safe_load(f)
+    check_schema_version(components_data, components_path)
 
     with open(args.prompt_template, encoding="utf-8") as f:
         prompt_template = f.read()

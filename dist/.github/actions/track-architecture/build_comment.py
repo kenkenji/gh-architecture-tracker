@@ -2,9 +2,13 @@
 
 import argparse
 import json
+import os
 import re
 import sys
 import yaml
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'shared'))
+from schema_utils import check_schema_version
 
 
 # record-mapping/parse_checkboxes.py の NO_IMPACT_ID と同期が必要
@@ -253,6 +257,7 @@ def main():
     if not data or "components" not in data:
         print("::error::Invalid components.yaml: 'components' key not found", file=sys.stderr)
         sys.exit(1)
+    check_schema_version(data, args.components_file)
 
     ai_ids = []
     source = "manual"
