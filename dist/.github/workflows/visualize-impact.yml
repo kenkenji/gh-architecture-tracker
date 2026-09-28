@@ -63,44 +63,8 @@ jobs:
         run: echo "::warning::Mermaid diagram generation failed for PR #${PR_NUMBER}"
 
       - name: Close tracking issue
-        shell: bash
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.client_payload.pr_number }}
-        run: |
-          set -euo pipefail
-
-          # mappings.jsonからno_impactフラグを取得
-          no_impact=$(gh api "repos/${REPO}/contents/mappings.json?ref=_architecture-tracker" \
-            --jq '.content' 2>/dev/null \
-            | base64 -d 2>/dev/null \
-            | python3 -c "
-          import sys, json, os
-          data = json.load(sys.stdin)
-          entry = data.get('mappings', {}).get(os.environ['PR_NUMBER'], {})
-          print('true' if entry.get('no_impact', False) else 'false')
-          " 2>/dev/null || echo "false")
-
-          # トラッキングIssueを検索してクローズ
-          issue_number=$(gh issue list \
-            --label "architecture-tracking" \
-            --state open \
-            --limit 1000 \
-            --json number,title \
-            --jq "[.[] | select(.title | test(\"PR #$PR_NUMBER —\"))] | .[0].number" \
-            --repo "$REPO")
-
-          if [ -n "$issue_number" ] && [ "$issue_number" != "null" ]; then
-            if [ "$no_impact" = "true" ]; then
-              close_comment="✅ PR #${PR_NUMBER} はアーキテクチャへの影響なしと記録されました。"
-            else
-              close_comment="✅ PR #${PR_NUMBER} のコンポーネント紐付けが完了しました。"
-            fi
-            gh issue close "$issue_number" \
-              --comment "$close_comment" \
-              --repo "$REPO"
-            echo "✅ Closed tracking issue #${issue_number}"
-          else
-            echo "ℹ️ No open tracking issue found for PR #${PR_NUMBER}"
-          fi
+        uses: ./.github/actions/close-tracking-issue
+        with:
+          github-token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          data-branch: _architecture-tracker
+          pr-number: ${{ github.event.client_payload.pr_number }}
