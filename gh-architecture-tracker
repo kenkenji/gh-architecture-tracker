@@ -411,7 +411,8 @@ cmd_init() {
   cp "${DIST_DIR}/.github/workflows/impact-analysis.yml" "${root}/.github/workflows/"
   cp "${DIST_DIR}/.github/workflows/catch-up.yml" "${root}/.github/workflows/"
   cp "${DIST_DIR}/.github/workflows/insights-analysis.yml" "${root}/.github/workflows/"
-  ok ".github/workflows/architecture-tracker.yml, impact-analysis.yml, catch-up.yml, insights-analysis.yml"
+  cp "${DIST_DIR}/.github/workflows/visualize-impact.yml" "${root}/.github/workflows/"
+  ok ".github/workflows/architecture-tracker.yml, impact-analysis.yml, catch-up.yml, insights-analysis.yml, visualize-impact.yml"
 
   # 旧バージョンの init ワークフローが残っている場合は削除
   if [ -f "${root}/.github/workflows/architecture-tracker-init.yml" ]; then
@@ -443,7 +444,7 @@ cmd_init() {
     info "変更をコミット・プッシュします..."
 
     cd "$root"
-    local add_targets=(.github/workflows/architecture-tracker.yml .github/workflows/impact-analysis.yml .github/workflows/catch-up.yml)
+    local add_targets=(.github/workflows/architecture-tracker.yml .github/workflows/impact-analysis.yml .github/workflows/catch-up.yml .github/workflows/insights-analysis.yml .github/workflows/visualize-impact.yml)
     for action in "${actions[@]}"; do
       if [ -d ".github/actions/${action}" ]; then
         add_targets+=(".github/actions/${action}")
@@ -577,7 +578,8 @@ cmd_update() {
   cp "${DIST_DIR}/.github/workflows/impact-analysis.yml" "${root}/.github/workflows/"
   cp "${DIST_DIR}/.github/workflows/catch-up.yml" "${root}/.github/workflows/"
   cp "${DIST_DIR}/.github/workflows/insights-analysis.yml" "${root}/.github/workflows/"
-  ok ".github/workflows/architecture-tracker.yml, impact-analysis.yml, catch-up.yml, insights-analysis.yml"
+  cp "${DIST_DIR}/.github/workflows/visualize-impact.yml" "${root}/.github/workflows/"
+  ok ".github/workflows/architecture-tracker.yml, impact-analysis.yml, catch-up.yml, insights-analysis.yml, visualize-impact.yml"
 
   # 旧バージョンの init ワークフローが残っている場合は削除
   if [ -f "${root}/.github/workflows/architecture-tracker-init.yml" ]; then
@@ -599,7 +601,7 @@ cmd_update() {
     info "--no-push が指定されたため、コミット・プッシュはスキップします。"
   else
     cd "$root"
-    local add_targets=(.github/workflows/architecture-tracker.yml .github/workflows/impact-analysis.yml .github/workflows/catch-up.yml)
+    local add_targets=(.github/workflows/architecture-tracker.yml .github/workflows/impact-analysis.yml .github/workflows/catch-up.yml .github/workflows/insights-analysis.yml .github/workflows/visualize-impact.yml)
     for action in "${actions[@]}"; do
       if [ -d ".github/actions/${action}" ]; then
         add_targets+=(".github/actions/${action}")
