@@ -797,6 +797,58 @@ cmd_catch_up() {
   fi
 }
 
+# 読み取り系サブコマンド（components / history）の実体は lib/architecture_query.py。
+# データの書き込みは行わない。オプションの解析は Python 側に任せ、ここでは
+# ヘルプ表示・実行環境の確認・--repo の補完のみ行う。
+find_python() {
+  local candidate
+  for candidate in python3 python; do
+    # Windows の python3 はストアへのエイリアスの場合があるため、実際に起動できるか確かめる。
+    # -I（隔離モード）で、作業ディレクトリのモジュールを読み込まないようにする
+    if command -v "$candidate" >/dev/null 2>&1 && \
+      "$candidate" -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+run_query() {
+  local subcommand="$1"
+  shift
+
+  local has_repo=false arg
+  for arg in "$@"; do
+    case "$arg" in
+      --help|-h) "usage_${subcommand}"; exit 0 ;;
+      --repo|--repo=*) has_repo=true ;;
+    esac
+  done
+
+  local python
+  if ! python=$(find_python); then
+    error "Python 3.8 以上が見つかりません。インストールしてから再度実行してください。"
+    exit 1
+  fi
+  # PyYAML の有無は Python 側で確認する。ここで `python -c 'import yaml'` とすると、
+  # 作業ディレクトリが sys.path の先頭に入り、そこにある yaml.py が実行されてしまう
+
+  local repo_args=()
+  if [ "$has_repo" = false ]; then
+    require_git_repo
+    local repo
+    repo=$(get_repo_nwo)
+    if [ -z "$repo" ]; then
+      error "リポジトリ情報を取得できませんでした。--repo OWNER/REPO を指定してください。"
+      exit 1
+    fi
+    repo_args=(--repo "$repo")
+  fi
+
+  "$python" "${SCRIPT_DIR}/lib/architecture_query.py" "$subcommand" ${repo_args[@]+"${repo_args[@]}"} "$@"
+}
+
 cmd_version() {
   echo "gh-architecture-tracker v${VERSION}"
 
@@ -824,6 +876,10 @@ gh architecture-tracker — Architecture Tracker セットアップツール
   update    Architecture Tracker を最新バージョンに更新する
   catch-up  過去のマージ済みPRを一括で取り込む
   version   バージョン情報を表示する
+
+読み取りコマンド（AIエージェント連携用。--json で構造化データを出力）:
+  components  現在のアーキテクチャモデル（コンポーネント一覧）を表示する
+  history     コンポーネントの変更履歴を表示する
 
 詳細:
   gh architecture-tracker <command> --help
@@ -885,12 +941,48 @@ gh architecture-tracker catch-up — 過去のマージ済みPRを一括で取�
 EOF
 }
 
+usage_components() {
+  cat <<EOF
+gh architecture-tracker components — 現在のアーキテクチャモデル（コンポーネント一覧）を表示する
+
+使い方:
+  gh architecture-tracker components [options]
+
+  _architecture-tracker ブランチの components.yaml を読み取り、
+  コンポーネントごとの紐付きPR数とあわせて表示します（読み取り専用）。
+
+オプション:
+  --json             JSON で出力する（コンポーネント間の関係も含む）
+  --repo OWNER/REPO  対象リポジトリ（省略時はカレントディレクトリの origin）
+  -h, --help         このヘルプを表示
+EOF
+}
+
+usage_history() {
+  cat <<EOF
+gh architecture-tracker history — コンポーネントの変更履歴を表示する
+
+使い方:
+  gh architecture-tracker history --component ID [options]
+
+  mappings.json から、指定したコンポーネントに紐付いたPRを新しい順に表示します（読み取り専用）。
+
+オプション:
+  --component ID     対象コンポーネントのID（必須）
+  --limit N          表示する件数の上限（デフォルト: すべて）
+  --json             JSON で出力する
+  --repo OWNER/REPO  対象リポジトリ（省略時はカレントディレクトリの origin）
+  -h, --help         このヘルプを表示
+EOF
+}
+
 # --- Main ---
 
 case "${1:-}" in
   init)     shift; cmd_init "$@" ;;
   update)   shift; cmd_update "$@" ;;
   catch-up) shift; cmd_catch_up "$@" ;;
+  components|history) cmd="$1"; shift; run_query "$cmd" "$@" ;;
   version)  cmd_version ;;
   --help|-h) usage ;;
   "") usage ;;
