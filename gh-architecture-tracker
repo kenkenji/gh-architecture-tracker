@@ -5,6 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DIST_DIR="${SCRIPT_DIR}/dist"
 VERSION=$(cat "${SCRIPT_DIR}/VERSION" 2>/dev/null || echo "dev")
 VERSION_MARKER=".architecture-tracker-version"
+# 前回の init / update で配布していた Agent Skill の本文のハッシュ（配置したかどうかに関係なく記録する）。
+# update で「Agent Skill をまだ案内していない」「配布版が更新された」を判定するために使う
+SKILL_RECORD=".architecture-tracker-skill-hash"
 APP_SLUG="architecture-tracker-cv"
 APP_INSTALL_URL="https://github.com/apps/${APP_SLUG}/installations/new"
 
@@ -77,12 +80,30 @@ get_repo_name() {
     basename "$(get_repo_root)"
 }
 
+# データブランチを取得する先の ref。FETCH_HEAD は他の fetch で上書きされるため、名前付きの ref に取得する
+DATA_REF="refs/remotes/origin/_architecture-tracker"
+
+# 取得済みのデータブランチ（DATA_REF）にあるファイルの内容（なければ空）。
+# Git Bash（MSYS）は "/" と ":" を含む引数（refs/...:file）をパスのリストとみなして変換するため、
+# ref をコミットの SHA に解決してから "<sha>:<file>" で読む
+read_data_file() {
+  local commit
+  commit=$(git rev-parse --verify -q "${DATA_REF}^{commit}" 2>/dev/null) || return 0
+  git show "${commit}:$1" 2>/dev/null || true
+}
+
 get_installed_version() {
-  if git fetch origin _architecture-tracker 2>/dev/null; then
-    git show FETCH_HEAD:${VERSION_MARKER} 2>/dev/null || echo ""
+  if git fetch origin "+_architecture-tracker:${DATA_REF}" 2>/dev/null; then
+    read_data_file "${VERSION_MARKER}"
   else
     echo ""
   fi
+}
+
+# データブランチに記録された Agent Skill のハッシュ（なければ空）。
+# get_installed_version が取得した DATA_REF を読む
+get_recorded_skill_hash() {
+  read_data_file "${SKILL_RECORD}" | tr -d '[:space:]'
 }
 
 confirm() {
@@ -153,7 +174,8 @@ create_data_branch() {
 
   local work_dir
   work_dir=$(mktemp -d)
-  trap 'rm -rf "$work_dir"' RETURN
+  # RETURN トラップは関数を抜けても残り、呼び出し元の終了時にも実行される（work_dir は未定義）ため、1回で解除する
+  trap 'rm -rf "$work_dir"; trap - RETURN' RETURN
 
   git init "$work_dir" >/dev/null 2>&1
   git -C "$work_dir" checkout --orphan _architecture-tracker >/dev/null 2>&1
@@ -188,6 +210,11 @@ YAML
   echo '{"version":"1.0","entries":[]}' > "${work_dir}/timeline.json"
   echo '{"version":"1.0","entries":[]}' > "${work_dir}/model-changelog.json"
   echo "$VERSION" > "${work_dir}/${VERSION_MARKER}"
+  local skill_hash
+  skill_hash=$(distributed_skill_hash)
+  if [ -n "$skill_hash" ]; then
+    echo "$skill_hash" > "${work_dir}/${SKILL_RECORD}"
+  fi
 
   git -C "$work_dir" add -A
   git -C "$work_dir" commit -m "Initialize architecture tracker data" >/dev/null
@@ -200,16 +227,18 @@ YAML
   fi
 }
 
+# バージョンマーカーと、配布した Agent Skill のハッシュ（skill_hash が空なら記録を変えない）を書き込む
 write_version_to_data_branch() {
-  local version="$1"
+  local version="$1" skill_hash="${2:-}"
   local remote_url
   remote_url=$(git remote get-url origin)
 
-  info "バージョンマーカーを _architecture-tracker ブランチに書き込んでいます..."
+  info "バージョン情報を _architecture-tracker ブランチに書き込んでいます..."
 
   local work_dir
   work_dir=$(mktemp -d)
-  trap 'rm -rf "$work_dir"' RETURN
+  # RETURN トラップは関数を抜けても残り、呼び出し元の終了時にも実行される（work_dir は未定義）ため、1回で解除する
+  trap 'rm -rf "$work_dir"; trap - RETURN' RETURN
 
   git clone --branch _architecture-tracker --single-branch --depth 1 "$remote_url" "$work_dir" >/dev/null 2>&1 || {
     warn "_architecture-tracker ブランチのcloneに失敗しました。"
@@ -217,21 +246,41 @@ write_version_to_data_branch() {
   }
 
   echo "$version" > "${work_dir}/${VERSION_MARKER}"
+  if [ -n "$skill_hash" ]; then
+    echo "$skill_hash" > "${work_dir}/${SKILL_RECORD}"
+  fi
 
   git -C "$work_dir" config user.name "$(git config user.name || echo 'gh-extension')"
   git -C "$work_dir" config user.email "$(git config user.email || echo 'gh-extension@users.noreply.github.com')"
   git -C "$work_dir" add "${VERSION_MARKER}"
+  if [ -n "$skill_hash" ]; then
+    git -C "$work_dir" add "${SKILL_RECORD}"
+  fi
 
   if git -C "$work_dir" diff --cached --quiet 2>/dev/null; then
-    ok "バージョンマーカーに変更はありません"
+    ok "バージョン情報に変更はありません"
+    return 0
+  fi
+
+  # 変わったものだけを表示・コミットメッセージに書く（Agent Skill の記録だけが変わる場合がある）
+  local changed_text subject_text
+  if git -C "$work_dir" diff --cached --quiet -- "${SKILL_RECORD}" 2>/dev/null; then
+    changed_text="バージョンマーカー (v${version})"
+    subject_text="version marker to v${version}"
+  elif git -C "$work_dir" diff --cached --quiet -- "${VERSION_MARKER}" 2>/dev/null; then
+    changed_text="Agent Skill の記録"
+    subject_text="Agent Skill record"
   else
-    git -C "$work_dir" commit -m "Update version marker to v${version}" >/dev/null
-    if git -C "$work_dir" push origin _architecture-tracker; then
-      ok "バージョンマーカーを更新しました (v${version})"
-    else
-      warn "バージョンマーカーの更新に失敗しました"
-      return 1
-    fi
+    changed_text="バージョンマーカー (v${version}) と Agent Skill の記録"
+    subject_text="version marker to v${version} and Agent Skill record"
+  fi
+
+  git -C "$work_dir" commit -m "Update ${subject_text}" >/dev/null
+  if git -C "$work_dir" push origin _architecture-tracker; then
+    ok "${changed_text}を更新しました"
+  else
+    warn "${changed_text}の更新に失敗しました"
+    return 1
   fi
 }
 
@@ -363,6 +412,124 @@ deploy_spa_to_ghpages() {
   return 0
 }
 
+# Agent Skill（Claude Code 等の AI エージェント向けの手順書）の配置先と配布元
+SKILL_PATH=".claude/skills/architecture-tracker/SKILL.md"
+SKILL_SRC="${DIST_DIR}/${SKILL_PATH}"
+# 配置した SKILL.md の末尾に、配置時の内容のハッシュを記録する行。
+# 現在の内容のハッシュと一致すれば未編集とみなし、update で自動的に最新版へ更新する
+SKILL_HASH_PREFIX="<!-- architecture-tracker-skill-hash: "
+SKILL_HASH_SUFFIX=" 未編集なら gh architecture-tracker update で自動更新されます -->"
+
+# ハッシュ行を除いた本文のハッシュ。改行コード（CRLF / LF）の違いは無視する
+skill_body_hash() {
+  tr -d '\r' < "$1" | sed "/^${SKILL_HASH_PREFIX}[0-9a-f]* /d" | git hash-object --stdin
+}
+
+# SKILL.md に記録されたハッシュ（なければ空）
+skill_recorded_hash() {
+  tr -d '\r' < "$1" | sed -n "s/^${SKILL_HASH_PREFIX}\([0-9a-f]*\) .*/\1/p" | tail -n 1
+}
+
+# 配布版の Agent Skill の本文のハッシュ（配布ファイルがなければ空）
+distributed_skill_hash() {
+  if [ -f "$SKILL_SRC" ]; then
+    skill_body_hash "$SKILL_SRC"
+  fi
+  # 配布ファイルがなくても、呼び出し元の $(...) が set -e で止まらないようにする
+  return 0
+}
+
+# Agent Skill を配置する。ユーザーがカスタマイズしている可能性があるため、既存ファイルは
+# 未編集（記録したハッシュと一致）の場合か、overwrite=true のときだけ上書きする。
+# notify=true のときは、編集済みで上書きしない場合に --update-skill を案内する
+# （update では、前回から配布版が更新されたときだけ案内する）。
+# 配置・更新してコミット対象にすべき場合のみ 0 を返す（配置しなかった・.gitignore 対象は 1）
+install_skill() {
+  local root="$1" overwrite="$2" notify="${3:-true}"
+  local dest="${root}/${SKILL_PATH}"
+
+  if [ ! -f "$SKILL_SRC" ]; then
+    warn "Agent Skill の配布ファイルが見つかりません。gh extension を再インストールしてください。"
+    return 1
+  fi
+
+  local src_hash
+  src_hash=$(skill_body_hash "$SKILL_SRC")
+
+  if [ -f "$dest" ]; then
+    local dest_hash
+    dest_hash=$(skill_body_hash "$dest")
+    if [ "$dest_hash" = "$src_hash" ]; then
+      ok "${SKILL_PATH}（最新です）"
+      return 1
+    fi
+    if [ "$overwrite" != true ]; then
+      if [ "$(skill_recorded_hash "$dest")" != "$dest_hash" ]; then
+        if [ "$notify" = true ]; then
+          info "${SKILL_PATH} は編集されているため上書きしません（新しい版があります）"
+          info "  最新版に置き換えるには: gh architecture-tracker update --update-skill"
+        else
+          ok "${SKILL_PATH}（編集済みのため変更しません）"
+        fi
+        return 1
+      fi
+      info "${SKILL_PATH} は未編集のため、最新版に更新します"
+    fi
+  fi
+
+  mkdir -p "$(dirname "$dest")"
+  {
+    tr -d '\r' < "$SKILL_SRC"
+    echo "${SKILL_HASH_PREFIX}${src_hash}${SKILL_HASH_SUFFIX}"
+  } > "$dest"
+  ok "${SKILL_PATH}"
+
+  # .claude/ を .gitignore しているリポジトリでは git add が失敗するため、コミット対象にしない
+  if git -C "$root" check-ignore -q "$SKILL_PATH"; then
+    warn "${SKILL_PATH} は .gitignore の対象のため、コミットしません"
+    return 1
+  fi
+  return 0
+}
+
+# 現在のブランチを origin にプッシュする（失敗しても警告のみ）
+push_current_branch() {
+  local branch
+  branch=$(git branch --show-current)
+  if git push origin "$branch"; then
+    ok "プッシュ完了 (${branch})"
+  else
+    warn "プッシュに失敗しました。手動で 'git push' してください。"
+  fi
+}
+
+# Agent Skill だけを最新版に置き換えてコミット・プッシュする（update --update-skill でバージョンが同じ場合）
+update_skill_only() {
+  local root="$1" no_push="$2"
+
+  info "Agent Skill を最新版に更新しています..."
+  if ! install_skill "$root" true; then
+    return 0
+  fi
+
+  if [ "$no_push" = true ]; then
+    info "--no-push が指定されたため、コミット・プッシュはスキップします。"
+    return 0
+  fi
+
+  cd "$root"
+  git add "$SKILL_PATH"
+  if git diff --cached --quiet -- "$SKILL_PATH"; then
+    info "変更はありません。"
+    return 0
+  fi
+  # ステージ済みの他の変更を巻き込まないよう、Agent Skill だけをコミットする
+  git commit -m "Update Architecture Tracker Agent Skill (v${VERSION})
+
+Updated via gh-architecture-tracker CLI extension." -- "$SKILL_PATH"
+  push_current_branch
+}
+
 # --- Commands ---
 
 cmd_init() {
@@ -432,6 +599,12 @@ cmd_init() {
   done
   ok ".github/actions/ (${action_count}ディレクトリ)"
 
+  # Agent Skill（既存ファイルは上書きしない）
+  local skill_added=false
+  if install_skill "$root" false; then
+    skill_added=true
+  fi
+
   echo ""
   ok "ファイルの配置が完了しました"
 
@@ -450,6 +623,10 @@ cmd_init() {
         add_targets+=(".github/actions/${action}")
       fi
     done
+    # Agent Skill は配置したときだけコミットする（既存ファイルへのユーザーの未コミットの編集を巻き込まない）
+    if [ "$skill_added" = true ]; then
+      add_targets+=("$SKILL_PATH")
+    fi
     git add "${add_targets[@]}"
 
     # 旧 init ワークフローの削除もステージング
@@ -460,19 +637,18 @@ cmd_init() {
     if git diff --cached --quiet; then
       info "変更はありません（既に最新です）。"
     else
-      git commit -m "Add Architecture Tracker (v${VERSION})
+      local commit_msg="Add Architecture Tracker (v${VERSION})
 
 Installed via gh-architecture-tracker CLI extension.
 - Workflow file for PR tracking
 - Composite Actions for component extraction and mapping"
-
-      local branch
-      branch=$(git branch --show-current)
-      if git push origin "$branch"; then
-        ok "プッシュ完了 (${branch})"
-      else
-        warn "プッシュに失敗しました。手動で 'git push' してください。"
+      if [ "$skill_added" = true ]; then
+        commit_msg+="
+- Agent Skill for AI coding agents"
       fi
+      git commit -m "$commit_msg"
+
+      push_current_branch
     fi
   fi
 
@@ -494,7 +670,7 @@ Installed via gh-architecture-tracker CLI extension.
     fi
     create_data_branch || true
     if [ "$data_branch_existed" = true ]; then
-      write_version_to_data_branch "$VERSION" || true
+      write_version_to_data_branch "$VERSION" "$(distributed_skill_hash)" || true
     fi
 
     # プリビルド済みSPAがあれば直接デプロイ
@@ -528,11 +704,12 @@ Installed via gh-architecture-tracker CLI extension.
 }
 
 cmd_update() {
-  local no_push=false
+  local no_push=false update_skill=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --no-push) no_push=true; shift ;;
+      --update-skill) update_skill=true; shift ;;
       --help|-h) usage_update; exit 0 ;;
       *) error "不明なオプション: $1"; usage_update; exit 1 ;;
     esac
@@ -549,8 +726,9 @@ cmd_update() {
   local repo_name
   repo_name=$(get_repo_name)
 
-  local installed
+  local installed recorded_skill_hash
   installed=$(get_installed_version)
+  recorded_skill_hash=$(get_recorded_skill_hash)
 
   if [ -z "$installed" ]; then
     warn "Architecture Tracker がまだインストールされていません。"
@@ -563,6 +741,10 @@ cmd_update() {
 
   if [ "$installed" = "$VERSION" ]; then
     ok "既に最新バージョンです。"
+    if [ "$update_skill" = true ]; then
+      # バージョンが同じでも、カスタマイズした Agent Skill を配布版に戻せるようにする
+      update_skill_only "$root" "$no_push"
+    fi
     exit 0
   fi
 
@@ -597,6 +779,32 @@ cmd_update() {
   done
   ok ".github/actions/"
 
+  # Agent Skill。編集済みのファイルは --update-skill のときだけ上書きする。
+  # データブランチの記録（前回配布していた版）と比べ、配布版が更新されたときだけ案内を表示する。
+  # 未配置の場合:
+  #   - 記録なし（まだ一度も案内していない）→ 確認してから配置する
+  #   - 記録あり（ユーザーが断った・削除した）→ 確認しない。配布版が更新されていれば案内だけ表示する
+  local skill_added=false install=false skill_updated=true
+  if [ -n "$recorded_skill_hash" ] && [ "$recorded_skill_hash" = "$(distributed_skill_hash)" ]; then
+    skill_updated=false
+  fi
+  if [ "$update_skill" = true ] || [ -f "${root}/${SKILL_PATH}" ]; then
+    install=true
+  elif [ -z "$recorded_skill_hash" ]; then
+    if confirm "AIエージェント向けの Agent Skill（${SKILL_PATH}）を配置しますか？"; then
+      install=true
+    else
+      info "Agent Skill は配置しません。今後は確認しません（Agent Skill が更新されたときは案内します）"
+      info "  配置するには: gh architecture-tracker update --update-skill"
+    fi
+  elif [ "$skill_updated" = true ]; then
+    info "Agent Skill が更新されています（このリポジトリには配置されていません）"
+    info "  配置するには: gh architecture-tracker update --update-skill"
+  fi
+  if [ "$install" = true ] && install_skill "$root" "$update_skill" "$skill_updated"; then
+    skill_added=true
+  fi
+
   if [ "$no_push" = true ]; then
     info "--no-push が指定されたため、コミット・プッシュはスキップします。"
   else
@@ -607,6 +815,10 @@ cmd_update() {
         add_targets+=(".github/actions/${action}")
       fi
     done
+    # Agent Skill は配置・更新したときだけコミットする（既存ファイルへのユーザーの未コミットの編集を巻き込まない）
+    if [ "$skill_added" = true ]; then
+      add_targets+=("$SKILL_PATH")
+    fi
     git add "${add_targets[@]}"
 
     # 旧 init ワークフローの削除もステージング
@@ -621,13 +833,7 @@ cmd_update() {
 
 Updated via gh-architecture-tracker CLI extension."
 
-      local branch
-      branch=$(git branch --show-current)
-      if git push origin "$branch"; then
-        ok "プッシュ完了 (${branch})"
-      else
-        warn "プッシュに失敗しました。手動で 'git push' してください。"
-      fi
+      push_current_branch
     fi
   fi
 
@@ -641,7 +847,7 @@ Updated via gh-architecture-tracker CLI extension."
     fi
     create_data_branch || true
     if [ "$data_branch_existed" = true ]; then
-      write_version_to_data_branch "$VERSION" || true
+      write_version_to_data_branch "$VERSION" "$(distributed_skill_hash)" || true
     fi
   fi
 
@@ -899,6 +1105,8 @@ gh architecture-tracker init — リポジトリに Architecture Tracker をセ�
 
 処理内容:
   1. ワークフローファイル・Composite Actionをリポジトリに配置
+     AIエージェント向けの Agent Skill（${SKILL_PATH}）も配置する
+     （既に存在する場合は上書きしない）
   2. 変更をコミット・プッシュ
   3. _architecture-tracker データブランチの作成
   4. プリビルド済みSPAをgh-pagesにデプロイ
@@ -915,8 +1123,11 @@ gh architecture-tracker update — Architecture Tracker を最新バージョン
   gh architecture-tracker update [options]
 
 オプション:
-  --no-push    ファイル更新のみ行い、コミット・プッシュはしない
-  -h, --help   このヘルプを表示
+  --no-push       ファイル更新のみ行い、コミット・プッシュはしない
+  --update-skill  Agent Skill（${SKILL_PATH}）を最新版で上書きする
+                  （指定しない場合、編集済みの Agent Skill は変更しない。
+                    バージョンが最新の場合も Agent Skill だけを更新する）
+  -h, --help      このヘルプを表示
 EOF
 }
 
